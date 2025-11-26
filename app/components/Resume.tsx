@@ -1,27 +1,96 @@
-import React, { useState, useMemo } from 'react';
+// src/app/components/ResumeBuilder.tsx
+"use client";
 
-// --- Bootstrap 5 CDN Injection (CSS only) ---
-if (typeof window !== 'undefined' && !document.getElementById('bootstrap-css')) {
-  const link = document.createElement('link');
-  link.id = 'bootstrap-css';
-  link.rel = 'stylesheet';
-  link.href = 'https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css';
-  document.head.appendChild(link);
+import React, { useState, useMemo, useEffect } from 'react';
+import { doc, getDoc } from 'firebase/firestore';
+import { useAuth } from '@/app/page';
+import { db } from '@/app/lib/firebase';
+
+// ===============================================
+// 1. CSS & GLOBAL STYLES
+// ===============================================
+if (typeof window !== 'undefined' && !document.getElementById('app-styles')) {
+  const styleSheet = document.createElement('style');
+  styleSheet.id = 'app-styles';
+  styleSheet.innerHTML = `
+    @import url('https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css');
+    @import url('https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Merriweather:ital,wght@0,300;0,400;0,700;1,300&display=swap');
+
+    :root {
+      --primary-color: #4f46e5;
+      --bg-color: #f8fafc;
+      --paper-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    }
+
+    body { background-color: var(--bg-color); font-family: 'Inter', sans-serif; }
+
+    /* Custom Scrollbar */
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 20px; }
+    
+    .form-control, .form-select {
+      border: 1px solid #e2e8f0;
+      background-color: #fff;
+      padding: 0.5rem 0.7rem;
+      font-size: 0.85rem;
+      border-radius: 0.4rem;
+    }
+    .form-control:focus {
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+    }
+    .form-label { font-weight: 600; font-size: 0.75rem; color: #64748b; margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    .a4-paper {
+      width: 210mm;
+      min-height: 297mm;
+      background: white;
+      box-shadow: var(--paper-shadow);
+      transform-origin: top center;
+      transition: transform 0.2s ease;
+    }
+
+    .accordion-button { background-color: #fff; font-weight: 600; color: #334155; padding: 0.75rem; font-size: 0.9rem; }
+    .accordion-button:not(.collapsed) { color: var(--primary-color); background-color: #eef2ff; }
+    .accordion-item { border: 1px solid #e2e8f0; overflow: hidden; border-radius: 0.5rem; margin-bottom: 0.5rem; }
+  `;
+  document.head.appendChild(styleSheet);
 }
 
-// --- TYPE DEFINITIONS (TypeScript Interfaces) ---
+// ===============================================
+// 2. EXTENDED TYPE DEFINITIONS
+// ===============================================
 interface Experience {
+  id: string;
   title: string;
   company: string;
   years: string;
+  locationType?: string; // Remote, On-site
+  employmentType?: string; // Full-time, Contract
   bullets: string;
 }
 
 interface Education {
+  id: string;
   degree: string;
   institution: string;
   years: string;
-  notes?: string; 
+  grade?: string; // GPA
+}
+
+interface Certification {
+  id: string;
+  name: string;
+  issuer: string;
+  date: string;
+}
+
+interface Language {
+  id: string;
+  language: string;
+  proficiency: string;
 }
 
 interface Skills {
@@ -35,801 +104,609 @@ interface ResumeData {
   phone: string;
   email: string;
   linkedin: string;
+  website: string;
   summary: string;
   experience: Experience[];
   education: Education[];
+  certifications: Certification[];
+  languages: Language[];
   skills: Skills;
 }
 
-interface Template {
-  id: string;
-  name: string;
-  columns: number;
-  description: string;
-  colorClass: string;
-  bgColorClass: string;
-}
-
-interface TemplateProps {
-    data: ResumeData;
-    accentColor: string;
-}
-
-// --- INITIAL DATA & STRUCTURES ---
-
+// ===============================================
+// 3. INITIAL DATA
+// ===============================================
 const initialResumeData: ResumeData = {
-  jobTitle: 'Senior Software Engineer',
-  name: 'Jane Doe',
-  phone: '555-123-4567',
-  email: 'jane.doe@example.com',
-  linkedin: 'linkedin.com/in/janedoe',
-  summary: 'Highly analytical and results-driven professional with 5+ years of experience in project management, specializing in developing efficiency-focused solutions. Proven ability to manage cross-functional teams and achieve key performance indicators (KPIs).',
-  experience: [
-    { title: 'Senior Project Manager', company: 'Tech Innovators Co.', years: '2020 - Present', bullets: '• Managed a portfolio of 5+ projects simultaneously, increasing team efficiency by 20%.\n• Developed and implemented a new tracking system that reduced reporting time by 3 hours per week.\n• Achieved 100% on-time project delivery for Q4 2024.' },
-  ],
-  education: [
-    { degree: 'M.S. Computer Science', institution: 'University of Engineering', years: '2018 - 2020', notes: 'GPA: 3.9/4.0' },
-    { degree: 'B.A. Business Administration', institution: 'State College', years: '2014 - 2018' },
-  ],
-  skills: {
-    technical: 'Project Management, Scrum, Agile, SQL, Python, Data Analysis, Cloud Services (AWS)',
-    soft: 'Leadership, Communication, Problem-Solving, Team Collaboration',
-  },
+  jobTitle: '',
+  name: '',
+  phone: '',
+  email: '',
+  linkedin: '',
+  website: '',
+  summary: '',
+  experience: [],
+  education: [],
+  certifications: [],
+  languages: [],
+  skills: { technical: '', soft: '' },
 };
 
-const templates: Template[] = [
-  { id: 'professional', name: 'Standard (ATS Optimized)', columns: 1, description: 'Single-column, clean, highly ATS-friendly format.', colorClass: 'border-primary', bgColorClass: 'bg-light' },
-  { id: 'creative', name: 'Modern (Visual Impact)', columns: 2, description: 'Visually distinct, focused on human appeal.', colorClass: 'border-danger', bgColorClass: 'bg-light' },
-  { id: 'classic', name: 'Classic (RenderCV Style)', columns: 1, description: 'Academic and technical focused with clear hierarchy.', colorClass: 'border-success', bgColorClass: 'bg-light' },
-  { id: 'executive', name: 'Executive (Deedy Style)', columns: 2, description: 'Strong, modern two-column layout focusing on experience.', colorClass: 'border-info', bgColorClass: 'bg-light' },
-  { id: 'minimalist', name: 'Creative Minimalist (AltaCV)', columns: 2, description: 'Bold sidebar, ideal for visual presentation and style.', colorClass: 'border-warning', bgColorClass: 'bg-light' },
-  { id: 'anti', name: 'Anti-CV (Unique Focus)', columns: 1, description: 'Unique layout focusing on lessons learned and growth.', colorClass: 'border-secondary', bgColorClass: 'bg-light' },
-];
+// ===============================================
+// 4. UPDATED TEMPLATE COMPONENTS
+// ===============================================
 
-// --- ATS SCORING LOGIC (Using TypeScript) ---
+const TemplateProfessional: React.FC<{ data: ResumeData }> = ({ data }) => (
+  <div className="p-5 h-100 font-sans text-dark">
+    {/* Header */}
+    <header className="border-bottom border-2 border-dark pb-4 mb-4">
+      <h1 className="display-5 fw-bold text-uppercase tracking-wide mb-1">{data.name || 'Your Name'}</h1>
+      <p className="h5 text-primary fw-medium mb-3">{data.jobTitle || 'Target Role'}</p>
+      <div className="d-flex flex-wrap gap-3 text-secondary small">
+        {data.email && <span><i className="bi bi-envelope-fill me-1"></i>{data.email}</span>}
+        {data.phone && <span><i className="bi bi-telephone-fill me-1"></i>{data.phone}</span>}
+        {data.linkedin && <span><i className="bi bi-linkedin me-1"></i>{data.linkedin}</span>}
+        {data.website && <span><i className="bi bi-globe me-1"></i>{data.website}</span>}
+      </div>
+    </header>
 
-const calculateATSScore = (data: ResumeData, templateId: string): number => {
-  let score = 50;
-  
-  // Logic remains the same (keywords, completeness, formatting bonus/penalty)
-  const requiredFields = [data.jobTitle, data.name, data.email, data.summary];
-  if (requiredFields.every(field => field.trim().length > 0)) { score += 5; }
-  if (data.experience.length > 0 && data.experience[0].bullets.length > 30) { score += 10; }
-  if (data.education.length > 0 && data.education[0].institution.length > 0) { score += 5; }
+    {/* Summary */}
+    {data.summary && (
+      <section className="mb-4">
+        <h3 className="h6 fw-bold text-uppercase border-bottom pb-1 mb-2">Professional Summary</h3>
+        <p className="small text-secondary" style={{ lineHeight: 1.6 }}>{data.summary}</p>
+      </section>
+    )}
 
-  const content = (
-    data.summary +
-    data.experience.map(exp => exp.bullets).join(' ') +
-    data.skills.technical +
-    data.skills.soft
-  ).toLowerCase();
-
-  const actionVerbs = ['managed', 'developed', 'achieved', 'implemented', 'led', 'created', 'optimized'];
-  let verbCount = 0;
-  actionVerbs.forEach(verb => {
-    if (content.includes(verb)) verbCount++;
-  });
-  score += Math.min(verbCount * 2, 15);
-
-  const numberCount = (content.match(/\d+(\+|\%|x|k|\s+)/g) || []).length;
-  score += Math.min(numberCount * 2, 10);
-
-  if (templateId === 'professional' || templateId === 'classic') {
-    score += 5;
-  } else if (templateId === 'anti') {
-    score -= 10; // Penalize highly non-traditional format
-  }
-
-  return Math.min(100, Math.max(0, Math.round(score)));
-};
-
-
-// --- UTILITY COMPONENTS ---
-
-const SectionTitle: React.FC<{ children: React.ReactNode, accentClass?: string, underlineStyle?: string }> = ({ children, accentClass = 'border-secondary', underlineStyle = 'border-bottom' }) => (
-  <h2 className={`fs-5 fw-bold ${underlineStyle} ${accentClass} pt-3 mb-4 text-uppercase text-dark`}>
-    {children}
-  </h2>
-);
-
-// --- RESUME TEMPLATES (RENDERING with Bootstrap) ---
-
-// --- 1. Standard (ATS Optimized) Template ---
-const ProfessionalTemplate: React.FC<TemplateProps> = ({ data }) => (
-    <div className="p-5 bg-white shadow-lg min-vh-100 font-sans">
-      <header className="text-center pb-3 border-bottom border-dark border-4 mb-4">
-        <h1 className="display-6 fw-bolder text-uppercase mb-1">{data.name}</h1>
-        <h2 className="fs-4 fw-semibold pb-1 text-primary">{data.jobTitle || "Your Professional Title"}</h2>
-        <div className="fs-6 mt-2 text-dark d-flex justify-content-center flex-wrap gap-3">
-          <span className="fw-medium">{data.phone}</span>
-          <a href={`mailto:${data.email}`} className="text-primary text-decoration-none fw-medium">{data.email}</a>
-          <span className="d-inline-block text-truncate fw-medium" style={{maxWidth: '200px'}}>{data.linkedin}</span>
-        </div>
-      </header>
-      <SectionTitle>Summary</SectionTitle>
-      <p className="fs-6 mb-4">{data.summary}</p>
-      <SectionTitle>Work Experience</SectionTitle>
-      {data.experience.map((exp, index) => (
-        <div key={index} className="mb-4">
+    {/* Experience */}
+    <section className="mb-4">
+      <h3 className="h6 fw-bold text-uppercase border-bottom pb-1 mb-3">Experience</h3>
+      {data.experience.length > 0 ? data.experience.map(exp => (
+        <div key={exp.id} className="mb-3">
           <div className="d-flex justify-content-between align-items-baseline">
-            <h3 className="fs-5 fw-bold mb-0">{exp.title} - {exp.company}</h3>
-            <span className="fs-6 fw-medium text-muted">{exp.years}</span>
+            <h4 className="fw-bold small mb-0">{exp.title}</h4>
+            <span className="small fw-bold text-dark">{exp.years}</span>
           </div>
-          <ul className="ms-4 mt-2 list-unstyled">
-            {exp.bullets.split('\n').map((bullet, i) => (
-              bullet.trim() && <li key={i} className="fs-6 position-relative ps-3 mb-1"><span className="position-absolute start-0 text-primary" style={{fontSize: '0.9rem'}}>&#8227;</span>{bullet.replace(/•/g, '').trim()}</li>
-            ))}
+          <div className="small text-primary fst-italic mb-1">
+            {exp.company} 
+            {exp.locationType && <span className="text-muted fw-normal"> • {exp.locationType}</span>}
+          </div>
+          <ul className="small text-secondary ps-3 mb-0">
+            {exp.bullets.split('\n').map((b, i) => b.trim() && <li key={i}>{b.replace(/•/g, '').trim()}</li>)}
           </ul>
         </div>
-      ))}
-      <div className="row g-4 pt-2">
-          <div className="col-12">
-              <SectionTitle>Skills</SectionTitle>
-              <p className="fs-6 mb-1"><span className="fw-bold">Technical:</span> {data.skills.technical}</p>
-              <p className="fs-6"><span className="fw-bold">Soft:</span> {data.skills.soft}</p>
+      )) : <p className="small text-muted fst-italic">No experience listed.</p>}
+    </section>
+
+    <div className="row">
+      <div className="col-7">
+        {/* Education */}
+        <h3 className="h6 fw-bold text-uppercase border-bottom pb-1 mb-2">Education</h3>
+        {data.education.map(edu => (
+          <div key={edu.id} className="mb-3 small">
+            <div className="fw-bold">{edu.institution}</div>
+            <div>{edu.degree}</div>
+            <div className="d-flex justify-content-between text-muted">
+              <span>{edu.years}</span>
+              {edu.grade && <span>GPA: {edu.grade}</span>}
+            </div>
           </div>
-          <div className="col-12">
-              <SectionTitle>Education</SectionTitle>
-              {data.education.map((edu, index) => (
-              <div key={index} className="d-flex justify-content-between flex-wrap fs-6 mb-2">
-                  <p className="fw-bold mb-0">{edu.institution}</p>
-                  <div className="text-end">
-                    <p className="text-muted mb-0">{edu.degree}, {edu.years}</p>
-                    {edu.notes && <p className="text-secondary fst-italic mb-0" style={{fontSize: '0.85rem'}}>{edu.notes}</p>}
-                  </div>
+        ))}
+
+        {/* Certifications */}
+        {data.certifications.length > 0 && (
+          <div className="mt-4">
+            <h3 className="h6 fw-bold text-uppercase border-bottom pb-1 mb-2">Certifications</h3>
+            {data.certifications.map(cert => (
+              <div key={cert.id} className="mb-1 small">
+                <span className="fw-bold">{cert.name}</span> <span className="text-muted">- {cert.issuer} ({cert.date})</span>
               </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="col-5">
+        {/* Skills */}
+        <h3 className="h6 fw-bold text-uppercase border-bottom pb-1 mb-2">Skills</h3>
+        <div className="mb-3">
+          <p className="small mb-1 fw-bold text-dark">Technical</p>
+          <p className="small text-secondary">{data.skills.technical}</p>
+        </div>
+        <div className="mb-3">
+          <p className="small mb-1 fw-bold text-dark">Soft Skills</p>
+          <p className="small text-secondary">{data.skills.soft}</p>
+        </div>
+
+        {/* Languages */}
+        {data.languages.length > 0 && (
+          <div>
+            <h3 className="h6 fw-bold text-uppercase border-bottom pb-1 mb-2">Languages</h3>
+            <ul className="list-unstyled small text-secondary">
+              {data.languages.map(lang => (
+                <li key={lang.id} className="mb-1 d-flex justify-content-between">
+                  <span>{lang.language}</span>
+                  <span className="text-muted fst-italic">{lang.proficiency}</span>
+                </li>
               ))}
+            </ul>
           </div>
+        )}
       </div>
     </div>
+  </div>
 );
 
-// --- 2. Modern (Visual Impact) Template ---
-const CreativeTemplate: React.FC<TemplateProps> = ({ data }) => (
-    <div className="p-5 bg-white shadow-lg min-vh-100 font-sans">
-      <div className="bg-danger text-white p-3 mb-4 rounded-3">
-        <h1 className="fs-2 fw-bold text-uppercase">{data.name.toUpperCase()}</h1>
-        <h2 className="fs-5 fw-light mt-1">{data.jobTitle || "Creative Professional"}</h2>
+const TemplateModern: React.FC<{ data: ResumeData }> = ({ data }) => (
+  <div className="d-flex h-100 font-sans bg-white">
+    {/* Sidebar */}
+    <div className="bg-dark text-white p-4" style={{ width: '33%', backgroundColor: '#1e293b' }}>
+      <div className="mb-5">
+        <h1 className="h2 fw-bold mb-1 text-white">{data.name || 'Your Name'}</h1>
+        <p className="text-info small text-uppercase letter-spacing-2">{data.jobTitle}</p>
       </div>
-      <div className="row g-4">
-        <div className="col-md-4 border-end border-danger border-opacity-50 border-dashed pe-4">
-          
-          <h3 className="fs-5 fw-bold text-danger border-bottom pb-1 mb-3">Contact</h3>
-          <p className="fs-6 mb-1">Phone: {data.phone}</p>
-          <p className="fs-6 mb-1">Email: <a href={`mailto:${data.email}`} className="text-danger">{data.email}</a></p>
-          <p className="fs-6 mb-3">LinkedIn: {data.linkedin.split('/').pop()}</p>
 
-          <h3 className="fs-5 fw-bold text-danger border-bottom pb-1 mt-4 mb-3">Skills</h3>
-          <p className="fs-6 fw-bold mt-2">TECHNICAL SUITE:</p>
-          <div className="d-flex flex-wrap mb-3">
-            {data.skills.technical.split(',').map(s => (
-              <span key={s} className="badge bg-light text-dark border border-secondary m-1 p-2 rounded-pill fw-normal fs-6">{s.trim()}</span>
-            ))}
-          </div>
-          <p className="fs-6 fw-bold mt-4">SOFT SKILLS:</p>
-          <div className="d-flex flex-wrap mb-4">
-            {data.skills.soft.split(',').map(s => (
-              <span key={s} className="badge bg-light text-dark border border-secondary m-1 p-2 rounded-pill fw-normal fs-6">{s.trim()}</span>
-            ))}
-          </div>
-
-          <h3 className="fs-5 fw-bold text-danger border-bottom pb-1 mb-3">Education</h3>
-          {data.education.map((edu, index) => (
-            <div key={index} className="mb-3 fs-6">
-              <p className="fw-bold mb-0">{edu.degree}</p>
-              <p className="text-muted mb-0">{edu.institution} ({edu.years})</p>
-              {edu.notes && <p className="text-secondary fst-italic mb-0" style={{fontSize: '0.8rem'}}>{edu.notes}</p>}
-            </div>
-          ))}
-        </div>
-
-        <div className="col-md-8">
-          <h3 className="fs-5 fw-bold text-danger border-bottom pb-1 mb-3">Summary</h3>
-          <p className="fs-6 mb-4">{data.summary}</p>
-
-          <h3 className="fs-5 fw-bold text-danger border-bottom pb-1 mb-3">Experience</h3>
-          {data.experience.map((exp, index) => (
-            <div key={index} className="mb-4 position-relative ps-4 border-start border-danger border-2">
-              <span className="position-absolute start-0 translate-middle-x top-0 bg-danger rounded-circle" style={{width: '10px', height: '10px'}}></span>
-              <div className="d-flex justify-content-between align-items-start">
-                <h4 className="fs-6 fw-bold mb-0">{exp.title}</h4>
-                <span className="fs-6 text-muted">{exp.years}</span>
-              </div>
-              <p className="fs-6 fst-italic mb-2">{exp.company}</p>
-              <ul className="list-unstyled mb-0 ms-3">
-                {exp.bullets.split('\n').map((bullet, i) => (
-                  bullet.trim() && <li key={i} className="fs-6 position-relative ps-3 mb-1"><span className="position-absolute start-0 text-danger" style={{fontSize: '0.8rem'}}>&#10033;</span>{bullet.replace(/•/g, '').trim()}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
+      <div className="mb-4">
+        <h6 className="text-uppercase text-white-50 border-bottom border-secondary pb-1 mb-3 small">Contact</h6>
+        <div className="small d-flex flex-column gap-2 opacity-75">
+          <div>{data.email}</div>
+          <div>{data.phone}</div>
+          <div>{data.website}</div>
+          <div>{data.linkedin.replace('https://', '')}</div>
         </div>
       </div>
-    </div>
-);
 
-// --- 3. Classic (RenderCV Style) Template ---
-const ClassicTemplate: React.FC<TemplateProps> = ({ data }) => (
-    <div className="p-5 bg-white shadow-lg min-vh-100 font-serif">
-        <header className="text-center pb-3 border-bottom border-dark border-2 mb-4">
-            <h1 className="display-6 fw-bolder mb-1">{data.name}</h1>
-            <p className="fs-6 text-muted mb-0">
-                {data.phone} | {data.email} | {data.linkedin.split('/').pop()}
-            </p>
-        </header>
-
-        <SectionTitle accentClass='border-dark' underlineStyle='border-bottom border-1'>PROFESSIONAL SUMMARY</SectionTitle>
-        <p className="fs-6 mb-4">{data.summary}</p>
-
-        <SectionTitle accentClass='border-dark' underlineStyle='border-bottom border-1'>EXPERIENCE</SectionTitle>
-        {data.experience.map((exp, index) => (
-            <div key={index} className="mb-4">
-                <div className="d-flex justify-content-between">
-                    <h3 className="fs-5 fw-bold mb-0 text-uppercase">{exp.title}, {exp.company}</h3>
-                    <span className="fs-6 fw-medium text-muted">{exp.years}</span>
-                </div>
-                <ul className="ms-4 mt-2 list-unstyled">
-                    {exp.bullets.split('\n').map((bullet, i) => (
-                        bullet.trim() && <li key={i} className="fs-6 position-relative ps-3 mb-1"><span className="position-absolute start-0 text-dark" style={{fontSize: '0.9rem'}}>&#8227;</span>{bullet.replace(/•/g, '').trim()}</li>
-                    ))}
-                </ul>
+      <div className="mb-4">
+        <h6 className="text-uppercase text-white-50 border-bottom border-secondary pb-1 mb-3 small">Education</h6>
+        {data.education.map(edu => (
+          <div key={edu.id} className="mb-3 small">
+            <div className="fw-bold text-white">{edu.degree}</div>
+            <div className="opacity-75">{edu.institution}</div>
+            <div className="d-flex justify-content-between opacity-50">
+              <span>{edu.years}</span>
+              {edu.grade && <span>{edu.grade}</span>}
             </div>
+          </div>
         ))}
-        
-        <SectionTitle accentClass='border-dark' underlineStyle='border-bottom border-1'>EDUCATION</SectionTitle>
-        {data.education.map((edu, index) => (
-            <div key={index} className="d-flex justify-content-between flex-wrap fs-6 mb-2">
-                <p className="fw-bold mb-0">{edu.degree}, {edu.institution}</p>
-                <div className="text-end">
-                    <p className="text-muted mb-0">{edu.years}</p>
-                    {edu.notes && <p className="text-secondary fst-italic mb-0" style={{fontSize: '0.85rem'}}>{edu.notes}</p>}
-                </div>
-            </div>
-        ))}
-        
-        <SectionTitle accentClass='border-dark' underlineStyle='border-bottom border-1'>SKILLS & TECHNOLOGIES</SectionTitle>
-        <p className="fs-6 mb-1"><span className="fw-bold">Languages:</span> {data.skills.technical}</p>
-        <p className="fs-6"><span className="fw-bold">Soft Skills:</span> {data.skills.soft}</p>
-    </div>
-);
-
-// --- 4. Executive (Deedy Style) Template ---
-const ExecutiveTemplate: React.FC<TemplateProps> = ({ data }) => (
-    <div className="p-5 bg-white shadow-lg min-vh-100 font-sans">
-      <header className="pb-3 mb-4">
-        <h1 className="fs-2 fw-bolder text-info mb-1">{data.name.toUpperCase()}</h1>
-        <p className="fs-6 text-dark mb-0">{data.email} | {data.phone}</p>
-        {data.linkedin && <p className="fs-6 text-dark mb-0">{data.linkedin}</p>}
-      </header>
-
-      <div className="row g-4">
-        {/* Left Column (Main Content) - col-md-8 */}
-        <div className="col-md-8 border-end border-light pe-4">
-            <h2 className="fs-4 fw-bolder text-info border-bottom border-info border-2 pb-1 mb-3">EXPERIENCE</h2>
-            {data.experience.map((exp, index) => (
-                <div key={index} className="mb-4">
-                    <div className="d-flex justify-content-between align-items-baseline">
-                        <h3 className="fs-5 fw-bold mb-0 text-dark">{exp.company} - {exp.title}</h3>
-                        <span className="fs-6 fw-medium text-muted">{exp.years}</span>
-                    </div>
-                    
-                    <ul className="ms-4 mt-2 list-unstyled">
-                        {exp.bullets.split('\n').map((bullet, i) => (
-                            bullet.trim() && <li key={i} className="fs-6 position-relative ps-3 mb-1"><span className="position-absolute start-0 text-info" style={{fontSize: '0.9rem'}}>&#8227;</span>{bullet.replace(/•/g, '').trim()}</li>
-                        ))}
-                    </ul>
-                </div>
-            ))}
-        </div>
-
-        {/* Right Column (Sidebar) - col-md-4 */}
-        <div className="col-md-4 ps-4">
-            <h2 className="fs-4 fw-bolder text-info border-bottom border-info border-2 pb-1 mb-3">EDUCATION</h2>
-            {data.education.map((edu, index) => (
-                <div key={index} className="mb-3 fs-6">
-                    <p className="fw-bold mb-0">{edu.institution}</p>
-                    <p className="text-muted mb-0">{edu.degree}</p>
-                    {edu.notes && <p className="fst-italic mb-0" style={{fontSize: '0.85rem'}}>{edu.notes}</p>}
-                    <p className="text-secondary mb-2">{edu.years}</p>
-                </div>
-            ))}
-
-            <h2 className="fs-4 fw-bolder text-info border-bottom border-info border-2 pb-1 mb-3">SKILLS</h2>
-            <p className="fs-6 fw-bold mb-1 text-dark">Programming</p>
-            <p className="fs-6 mb-3">{data.skills.technical.split(',').slice(0, 3).join(' • ')}</p>
-
-            <p className="fs-6 fw-bold mb-1 text-dark">Technology</p>
-            <p className="fs-6 mb-3">{data.skills.technical.split(',').slice(3).join(' • ')}</p>
-
-            <h2 className="fs-4 fw-bolder text-info border-bottom border-info border-2 pb-1 mb-3">SUMMARY</h2>
-            <p className="fs-6 text-dark">{data.summary.substring(0, 250)}...</p>
-        </div>
       </div>
-    </div>
-);
 
-// --- 5. Creative Minimalist (AltaCV Style) Template ---
-const MinimalistTemplate: React.FC<TemplateProps> = ({ data }) => (
-    <div className="p-0 bg-white shadow-lg min-vh-100">
-        <div className="row g-0">
-            {/* Left Sidebar - col-md-4 */}
-            <div className="col-md-4 bg-dark text-white p-4 shadow-sm" style={{ minHeight: '100vh' }}>
-                <h1 className="display-5 fw-bolder text-uppercase text-warning mb-2">{data.name}</h1>
-                <p className="fs-6 fw-bold mb-4 text-light">{data.jobTitle}</p>
-
-                <h3 className="fs-5 fw-bold text-warning border-bottom border-warning pb-1 mb-3">Contact</h3>
-                <p className="fs-6 mb-1">{data.email}</p>
-                <p className="fs-6 mb-1">{data.phone}</p>
-                <p className="fs-6 mb-4">{data.linkedin.split('/').pop()}</p>
-
-                <h3 className="fs-5 fw-bold text-warning border-bottom border-warning pb-1 mb-3">Education</h3>
-                {data.education.map((edu, index) => (
-                    <div key={index} className="mb-3 fs-6">
-                        <p className="fw-bold mb-0">{edu.degree}</p>
-                        <p className="text-light mb-0">{edu.institution} ({edu.years})</p>
-                        {edu.notes && <p className="fst-italic mb-2" style={{fontSize: '0.8rem'}}>{edu.notes}</p>}
-                    </div>
-                ))}
-                
-                <h3 className="fs-5 fw-bold text-warning border-bottom border-warning pb-1 mt-4 mb-3">Skills</h3>
-                <div className="d-flex flex-wrap gap-2">
-                    {data.skills.technical.split(',').concat(data.skills.soft.split(',')).map(s => (
-                      s.trim() && <span key={s} className="badge bg-warning text-dark p-2 rounded-pill fw-normal">{s.trim()}</span>
-                    ))}
-                </div>
-            </div>
-
-            {/* Right Main Content - col-md-8 */}
-            <div className="col-md-8 p-5">
-                <h3 className="fs-5 fw-bold text-dark border-bottom border-secondary pb-1 mb-3">Summary</h3>
-                <p className="fs-6 mb-4">{data.summary}</p>
-
-                <h3 className="fs-5 fw-bold text-dark border-bottom border-secondary pb-1 mb-3">Experience</h3>
-                {data.experience.map((exp, index) => (
-                    <div key={index} className="mb-4">
-                        <div className="d-flex justify-content-between align-items-start">
-                            <h4 className="fs-5 fw-bold text-dark mb-0">{exp.title}</h4>
-                            <span className="fs-6 text-muted">{exp.years}</span>
-                        </div>
-                        <p className="fs-6 fst-italic mb-2 text-secondary">{exp.company}</p>
-                        <ul className="ms-3 list-unstyled">
-                            {exp.bullets.split('\n').map((bullet, i) => (
-                                bullet.trim() && <li key={i} className="fs-6 position-relative ps-3 mb-1"><span className="position-absolute start-0 text-secondary" style={{fontSize: '0.9rem'}}>&#9679;</span>{bullet.replace(/•/g, '').trim()}</li>
-                            ))}
-                        </ul>
-                    </div>
-                ))}
-            </div>
+      {data.skills.technical && (
+        <div className="mb-4">
+          <h6 className="text-uppercase text-white-50 border-bottom border-secondary pb-1 mb-3 small">Skills</h6>
+          <div className="d-flex flex-wrap gap-1">
+            {data.skills.technical.split(',').map((s, i) => (
+              <span key={i} className="badge bg-secondary bg-opacity-25 fw-normal border border-secondary border-opacity-25">{s.trim()}</span>
+            ))}
+          </div>
         </div>
-    </div>
-);
+      )}
 
-
-// --- 6. Anti-CV (Unique Focus) Template ---
-const AntiCVTemplate: React.FC<TemplateProps> = ({ data }) => (
-    <div className="p-5 bg-white shadow-lg min-vh-100 font-sans">
-      <header className="pb-3 mb-4 border-bottom border-dark border-2">
-        <h1 className="fs-2 fw-bolder text-dark mb-1">{data.name}</h1>
-        <p className="fs-6 text-muted mb-0">{data.email} | {data.phone} | {data.linkedin.split('/').pop()}</p>
-        <h2 className="fs-5 fw-light mt-2 fst-italic text-danger">Anti Curriculum Vitae (Lessons Learned)</h2>
-      </header>
-
-      <SectionTitle accentClass='border-danger' underlineStyle='border-bottom border-1'>LESSONS & MISTAKES (WORK EXPERIENCE)</SectionTitle>
-      {data.experience.map((exp, index) => (
-        <div key={index} className="mb-4">
-          <h3 className="fs-5 fw-bold mb-2 text-dark">Mistake: {exp.title} at {exp.company}</h3>
-          <p className="fs-6 mb-1 fw-bold text-danger">The Lesson Learned:</p>
-          <ul className="ms-4 list-unstyled">
-            {exp.bullets.split('\n').map((bullet, i) => (
-              bullet.trim() && <li key={i} className="fs-6 position-relative ps-3 mb-1"><span className="position-absolute start-0 text-danger" style={{fontSize: '0.9rem'}}>&#10007;</span>{bullet.replace(/•/g, '').trim()}</li>
+      {data.languages.length > 0 && (
+        <div>
+          <h6 className="text-uppercase text-white-50 border-bottom border-secondary pb-1 mb-3 small">Languages</h6>
+          <ul className="list-unstyled small opacity-75">
+            {data.languages.map(lang => (
+              <li key={lang.id} className="mb-1 d-flex justify-content-between">
+                <span>{lang.language}</span>
+                <span className="opacity-50">{lang.proficiency}</span>
+              </li>
             ))}
           </ul>
         </div>
-      ))}
-
-      <SectionTitle accentClass='border-danger' underlineStyle='border-bottom border-1'>GROWTH (SKILLS & EDUCATION)</SectionTitle>
-      <div className="row g-4">
-        <div className="col-md-6">
-            <h4 className="fs-6 fw-bold mb-2 text-dark">Skills I need to develop:</h4>
-            <p className="fs-6 mb-1 text-muted">Technical: {data.skills.technical}</p>
-            <p className="fs-6 text-muted">Soft: {data.skills.soft}</p>
-        </div>
-        <div className="col-md-6">
-            <h4 className="fs-6 fw-bold mb-2 text-dark">Educational Gaps:</h4>
-            {data.education.map((edu, index) => (
-                <div key={index} className="mb-2 fs-6">
-                    <p className="fw-bold mb-0">{edu.degree}</p>
-                    <p className="text-muted mb-0">{edu.institution} ({edu.years})</p>
-                </div>
-            ))}
-        </div>
-      </div>
+      )}
     </div>
+
+    {/* Main Content */}
+    <div className="p-4 pt-5" style={{ width: '67%' }}>
+      <section className="mb-5">
+        <h3 className="h6 fw-bold text-uppercase text-primary mb-3">Profile</h3>
+        <p className="small text-secondary" style={{ lineHeight: 1.7 }}>{data.summary}</p>
+      </section>
+
+      <section className="mb-5">
+        <h3 className="h6 fw-bold text-uppercase text-primary mb-4">Experience</h3>
+        {data.experience.map(exp => (
+          <div key={exp.id} className="mb-4 position-relative ps-3 border-start border-2 border-light">
+            <div className="d-flex justify-content-between align-items-center mb-1">
+              <h4 className="fw-bold small mb-0 text-dark">{exp.title}</h4>
+              <span className="badge bg-light text-dark border">{exp.years}</span>
+            </div>
+            <div className="small text-primary fw-bold mb-2">
+              {exp.company} 
+              {exp.employmentType && <span className="text-muted fw-normal"> • {exp.employmentType}</span>}
+            </div>
+            <ul className="small text-secondary ps-3 mb-0">
+              {exp.bullets.split('\n').map((b, i) => b.trim() && <li key={i} className="mb-1">{b.replace(/•/g, '').trim()}</li>)}
+            </ul>
+          </div>
+        ))}
+      </section>
+
+      {data.certifications.length > 0 && (
+        <section>
+          <h3 className="h6 fw-bold text-uppercase text-primary mb-3">Certifications</h3>
+          <div className="row g-2">
+            {data.certifications.map(cert => (
+              <div key={cert.id} className="col-6">
+                <div className="p-2 border rounded bg-light small">
+                  <div className="fw-bold text-dark">{cert.name}</div>
+                  <div className="text-muted tiny">{cert.issuer} • {cert.date}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </div>
+  </div>
 );
 
-const templateMap: { [key: string]: React.FC<TemplateProps> } = {
-  professional: ProfessionalTemplate,
-  creative: CreativeTemplate,
-  classic: ClassicTemplate,
-  executive: ExecutiveTemplate,
-  minimalist: MinimalistTemplate,
-  anti: AntiCVTemplate,
-};
+const TemplateMinimal: React.FC<{ data: ResumeData }> = ({ data }) => (
+  <div className="p-5 h-100 font-serif text-dark bg-white">
+    <header className="text-center mb-5">
+      <h1 className="display-4 fw-bold mb-2" style={{ fontFamily: 'Merriweather, serif' }}>{data.name}</h1>
+      <p className="text-secondary fst-italic mb-3">{data.jobTitle}</p>
+      <p className="small text-muted text-uppercase letter-spacing-2">
+        {data.email} &bull; {data.phone} {data.website && <span>&bull; {data.website}</span>}
+      </p>
+    </header>
 
-// --- HANDLERS AND MAIN COMPONENT LOGIC ---
-
-// Function to handle browser Print to PDF (Preserves Visual Style)
-const handlePrintPDF = () => {
-    const resumeElement = document.getElementById('resume-preview');
-    // FIX: Add check for printWindow being null/undefined before using it
-    const printWindow = window.open('', '', 'height=600,width=800');
-    
-    if (printWindow) {
-        // Use a blank title to prevent it from showing up in the PDF header/footer
-        printWindow.document.write('<html><head><title></title>'); 
-        
-        // Inject Bootstrap CSS for styling in the print view
-        printWindow.document.write('<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">');
-        
-        // Inject essential print styles
-        printWindow.document.write(`
-            <style>
-                @media print {
-                    /* Suppress default browser header/footer text entirely */
-                    @page { 
-                        margin: 0.5in; 
-                        size: letter; 
-                        /* Important: these two properties suppress header/footer text */
-                        marks: none; 
-                        @top-center { content: ""; } 
-                        @bottom-center { content: ""; }
-                    } 
-                    
-                    body { margin: 0; padding: 0; }
-                    .shadow-lg { box-shadow: none !important; }
-                    
-                    /* Ensures column layout is maintained if applicable */
-                    .col-md-4 { flex: 0 0 33.333333%; max-width: 33.333333%; }
-                    .col-md-8 { flex: 0 0 66.666667%; max-width: 66.666667%; }
-                    
-                    /* Force background colors/accents to print for color consistency */
-                    .bg-danger { background-color: #dc3545 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                    .text-white { color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                    .bg-light { background-color: #f8f9fa !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                    .bg-dark { background-color: #212529 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; } /* For minimalist sidebar */
-
-
-                    /* Fix padding for print */
-                    .p-5 { padding: 0.5in !important; }
-
-                    /* Ensure list items don't break across columns/pages poorly */
-                    ul { page-break-inside: avoid; }
-                    
-                }
-            </style>
-        `);
-        
-        printWindow.document.write('</head><body>');
-        // FIX: Only write innerHTML if resumeElement is found
-        if (resumeElement) {
-             printWindow.document.write(resumeElement.innerHTML);
-        } else {
-             printWindow.document.write('<div>Could not find resume preview content.</div>');
-        }
-       
-        printWindow.document.write('</body></html>');
-        printWindow.document.close();
-        
-        // Wait for styles to render, then print
-        printWindow.onload = function() {
-            printWindow.focus();
-            printWindow.print();
-            printWindow.close();
-        };
-    } else {
-        const messageBox = document.getElementById('messageBox');
-        if (messageBox) {
-             messageBox.innerHTML = 'Error: Could not open print window.';
-            setTimeout(() => messageBox.innerHTML = '', 3000);
-        }
-    }
-};
-
-interface ResumeFormProps {
-    data: ResumeData;
-    setData: React.Dispatch<React.SetStateAction<ResumeData>>;
-    goNext: () => void;
-}
-
-// Defining types for safe array handling
-type ExperienceKey = keyof Experience;
-type EducationKey = keyof Education;
-type ResumeArraySection = 'experience' | 'education';
-
-const ResumeForm: React.FC<ResumeFormProps> = ({ data, setData, goNext }) => {
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const { name, value } = e.target;
-    if (name.includes('.')) {
-      const [section, subKey] = name.split('.');
-      setData(prev => ({
-        ...prev,
-        [section]: {
-          ...(prev[section as keyof ResumeData] as Skills),
-          [subKey]: value,
-        } as Skills, 
-      }));
-    } else {
-      setData(prev => ({ ...prev, [name]: value } as ResumeData));
-    }
-  };
-
-  // Generic handler for Experience and Education array fields
-  const handleArrayChange = (section: ResumeArraySection, index: number, key: ExperienceKey | EducationKey, value: string) => {
-    setData(prev => {
-        const currentArray = prev[section];
-
-        const updatedArray = currentArray.map((item, i) => {
-            if (i === index) {
-                // Ensure correct key access based on section type
-                if (section === 'experience') {
-                    return { ...item as Experience, [key as ExperienceKey]: value };
-                }
-                if (section === 'education') {
-                    return { ...item as Education, [key as EducationKey]: value };
-                }
-            }
-            return item;
-        }) as any; // Cast to 'any' for the final array assignment to satisfy TypeScript compiler
-
-        return {
-            ...prev,
-            [section]: updatedArray,
-        } as ResumeData;
-    });
-  };
-  
-  const addItem = (section: ResumeArraySection) => {
-    const newItem = section === 'experience'
-        ? { title: '', company: '', years: '', bullets: '' } as Experience
-        : { degree: '', institution: '', years: '', notes: '' } as Education;
-        
-    setData(prev => ({
-        ...prev,
-        [section]: [...prev[section], newItem] as any,
-    }) as ResumeData);
-  };
-
-  const removeItem = (section: ResumeArraySection, index: number) => {
-    setData(prev => ({
-      ...prev,
-      [section]: prev[section].filter((_, i) => i !== index) as any,
-    }));
-  };
-
-  return (
-    <div className="p-4 bg-white shadow-lg rounded-3">
-      {/* Basic Info */}
-      <fieldset className="border p-3 rounded-3 mb-4">
-        <legend className="fs-6 fw-semibold px-2 text-primary">Personal & Target Info</legend>
-        <div className="row g-3">
-          <div className="col-md-6"><input type="text" name="name" value={data.name} onChange={handleChange} placeholder="Full Name" className="form-control" /></div>
-          <div className="col-md-6"><input type="text" name="jobTitle" value={data.jobTitle} onChange={handleChange} placeholder="Target Job Title (e.g., Senior Developer)" className="form-control" /></div>
-          <div className="col-md-6"><input type="email" name="email" value={data.email} onChange={handleChange} placeholder="Email Address" className="form-control" /></div>
-          <div className="col-md-6"><input type="tel" name="phone" value={data.phone} onChange={handleChange} placeholder="Phone Number" className="form-control" /></div>
-          <div className="col-12"><input type="url" name="linkedin" value={data.linkedin} onChange={handleChange} placeholder="LinkedIn URL" className="form-control" /></div>
-        </div>
-      </fieldset>
-
-      {/* Summary */}
-      <fieldset className="border p-3 rounded-3 mb-4">
-        <legend className="fs-6 fw-semibold px-2 text-primary">Professional Summary</legend>
-        <textarea name="summary" value={data.summary} onChange={handleChange} rows={4} placeholder="Write a concise summary highlighting your best achievements and skills. Use numbers!" className="form-control"></textarea>
-      </fieldset>
-
-      {/* Experience */}
-      <fieldset className="border p-3 rounded-3 mb-4">
-        <legend className="fs-6 fw-semibold px-2 text-primary">Work Experience (Start bullets with action verbs!)</legend>
-        {data.experience.map((exp, index) => (
-          <div key={index} className="p-3 mb-3 border rounded-3 bg-light">
-            <div className="row g-2 mb-2">
-              <div className="col-sm-6"><input type="text" value={exp.title} onChange={(e) => handleArrayChange('experience', index, 'title', e.target.value)} placeholder="Job Title" className="form-control form-control-sm" /></div>
-              <div className="col-sm-3"><input type="text" value={exp.company} onChange={(e) => handleArrayChange('experience', index, 'company', e.target.value)} placeholder="Company" className="form-control form-control-sm" /></div>
-              <div className="col-sm-3"><input type="text" value={exp.years} onChange={(e) => handleArrayChange('experience', index, 'years', e.target.value)} placeholder="Years" className="form-control form-control-sm" /></div>
-            </div>
-            <textarea value={exp.bullets} onChange={(e) => handleArrayChange('experience', index, 'bullets', e.target.value)} rows={3} placeholder="Bullet Points (one per line, use '•' or '–' at the start)" className="form-control form-control-sm"></textarea>
-            <div className="d-flex justify-content-end mt-2">
-              <button type="button" onClick={() => removeItem('experience', index)} className="btn btn-sm text-danger p-0">Remove Entry</button>
-            </div>
-          </div>
-        ))}
-        <button type="button" onClick={() => addItem('experience')} className="btn btn-success w-100 mt-2">
-          + Add Experience
-        </button>
-      </fieldset>
-
-      {/* Education */}
-      <fieldset className="border p-3 rounded-3 mb-4">
-        <legend className="fs-6 fw-semibold px-2 text-primary">Education</legend>
-        {data.education.map((edu, index) => (
-          <div key={index} className="p-3 mb-3 border rounded-3 bg-light row g-2">
-            <div className="col-sm-4"><input type="text" value={edu.degree} onChange={(e) => handleArrayChange('education', index, 'degree', e.target.value)} placeholder="Degree/Major" className="form-control form-control-sm" /></div>
-            <div className="col-sm-4"><input type="text" value={edu.institution} onChange={(e) => handleArrayChange('education', index, 'institution', e.target.value)} placeholder="Institution Name" className="form-control form-control-sm" /></div>
-            <div className="col-sm-2"><input type="text" value={edu.years} onChange={(e) => handleArrayChange('education', index, 'years', e.target.value)} placeholder="Years" className="form-control form-control-sm" /></div>
-            <div className="col-sm-2"><input type="text" value={edu.notes || ''} onChange={(e) => handleArrayChange('education', index, 'notes', e.target.value)} placeholder="Notes/GPA" className="form-control form-control-sm" /></div>
-            <div className="col-12 d-flex justify-content-end">
-              <button type="button" onClick={() => removeItem('education', index)} className="btn btn-sm text-danger p-0">Remove Entry</button>
-            </div>
-          </div>
-        ))}
-        <button type="button" onClick={() => addItem('education')} className="btn btn-success w-100 mt-2">
-          + Add Education
-        </button>
-      </fieldset>
-
-      {/* Skills */}
-      <fieldset className="border p-3 rounded-3 mb-4">
-        <legend className="fs-6 fw-semibold px-2 text-primary">Skills</legend>
-        <p className="fs-6 text-muted mb-1">List skills separated by commas (e.g., Python, SQL, AWS)</p>
-        <input type="text" name="skills.technical" value={data.skills.technical} onChange={handleChange} placeholder="Technical/Hard Skills" className="form-control mb-2" />
-        <input type="text" name="skills.soft" value={data.skills.soft} onChange={handleChange} placeholder="Soft Skills" className="form-control" />
-      </fieldset>
-
-      <button onClick={goNext} className="btn btn-primary btn-lg w-100 shadow-lg">
-        4. Check ATS Score & Download Resume
-      </button>
+    <div className="px-4 mb-5">
+      <p className="text-center small text-secondary" style={{ lineHeight: 1.8 }}>{data.summary}</p>
     </div>
-  );
-};
 
+    <hr className="my-5 opacity-25" />
 
-// --- MAIN RESUME BUILDER COMPONENT ---
+    <div className="row g-0">
+      <div className="col-3">
+        <h3 className="h6 fw-bold text-uppercase text-secondary">Experience</h3>
+      </div>
+      <div className="col-9">
+        {data.experience.map(exp => (
+          <div key={exp.id} className="mb-4">
+            <div className="d-flex justify-content-between mb-1">
+              <h4 className="h6 fw-bold mb-0">{exp.title}</h4>
+              <span className="small text-muted fst-italic">{exp.years}</span>
+            </div>
+            <div className="small text-secondary mb-2">{exp.company}</div>
+            <p className="small text-muted" style={{ whiteSpace: 'pre-line' }}>{exp.bullets}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {(data.education.length > 0 || data.certifications.length > 0) && (
+      <div className="row g-0 mt-4">
+        <div className="col-3">
+          <h3 className="h6 fw-bold text-uppercase text-secondary">Education</h3>
+        </div>
+        <div className="col-9">
+          {data.education.map(edu => (
+            <div key={edu.id} className="mb-3 small">
+              <div className="fw-bold">{edu.institution}</div>
+              <div className="text-muted">{edu.degree}, {edu.years} {edu.grade && <span>(GPA: {edu.grade})</span>}</div>
+            </div>
+          ))}
+          {data.certifications.length > 0 && (
+            <div className="mt-3">
+              <p className="fw-bold small mb-1">Certifications</p>
+              {data.certifications.map(cert => (
+                <div key={cert.id} className="text-muted small">• {cert.name} ({cert.issuer})</div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    )}
+  </div>
+);
+
+// ===============================================
+// 5. MAIN BUILDER LOGIC
+// ===============================================
 
 const ResumeBuilder: React.FC = () => {
-  const [step, setStep] = useState<number>(1);
-  const [selectedTemplate, setSelectedTemplate] = useState<string>(templates[0].id);
-  const [resumeData, setResumeData] = useState<ResumeData>(initialResumeData);
+  const { user } = useAuth();
+  const [data, setData] = useState<ResumeData>(initialResumeData);
+  const [template, setTemplate] = useState<'professional' | 'modern' | 'minimal'>('modern');
+  const [zoom, setZoom] = useState(0.65);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const currentTemplate = useMemo(() => templates.find(t => t.id === selectedTemplate) || templates[0], [selectedTemplate]);
-  const ResumeComponent = useMemo(() => templateMap[selectedTemplate], [selectedTemplate]);
+  const appId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID || 'default-app-id';
 
-  const atsScore = useMemo(() => calculateATSScore(resumeData, selectedTemplate), [resumeData, selectedTemplate]);
+  // --- FETCH & MAP PROFILE DATA ---
+  useEffect(() => {
+    const fetchProfileData = async () => {
+      if (!user) { setIsLoading(false); return; }
 
-  // --- Step Handlers ---
-  const handleTemplateSelect = (id: string) => {
-    setSelectedTemplate(id);
-    setStep(2);
+      try {
+        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'data', 'profile');
+        const docSnap = await getDoc(docRef);
+
+        if (docSnap.exists()) {
+          const profile = docSnap.data();
+          
+          const resumeMappedData: ResumeData = {
+            name: profile.name || '',
+            jobTitle: profile.headline || '',
+            phone: profile.phone || '', 
+            email: user.email || '',
+            linkedin: profile.socialLinks?.linkedin || '',
+            website: profile.website || '',
+            summary: profile.about || '',
+            
+            // Map Experience (with new fields)
+            experience: Array.isArray(profile.experience) ? profile.experience.map((exp: any) => ({
+              id: String(exp.id || Date.now()),
+              title: exp.title || '',
+              company: exp.company || '',
+              years: exp.dates || '',
+              locationType: exp.locationType || '',
+              employmentType: exp.employmentType || '',
+              bullets: exp.description || '' 
+            })) : [],
+
+            // Map Education (with Grade)
+            education: Array.isArray(profile.education) ? profile.education.map((edu: any) => ({
+              id: String(edu.id || Date.now()),
+              institution: edu.school || '',
+              degree: edu.degree || '',
+              years: edu.dates || '',
+              grade: edu.grade || ''
+            })) : [],
+
+            // Map Certifications
+            certifications: Array.isArray(profile.certifications) ? profile.certifications.map((cert: any) => ({
+              id: String(cert.id || Date.now()),
+              name: cert.name || '',
+              issuer: cert.issuer || '',
+              date: cert.date || ''
+            })) : [],
+
+            // Map Languages
+            languages: Array.isArray(profile.languages) ? profile.languages.map((lang: any) => ({
+              id: String(lang.id || Date.now()),
+              language: lang.language || '',
+              proficiency: lang.proficiency || ''
+            })) : [],
+
+            // Map Skills
+            skills: {
+              technical: Array.isArray(profile.skills) ? profile.skills.map((s: any) => s.name).join(', ') : '',
+              soft: '' 
+            }
+          };
+          setData(resumeMappedData);
+        }
+      } catch (error) {
+        console.error("Error fetching profile:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchProfileData();
+  }, [user, appId]);
+
+  // --- HANDLERS ---
+  const updateField = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const { name, value } = e.target;
+    if (name.includes('.')) {
+      const [section, key] = name.split('.');
+      setData(prev => ({ ...prev, [section]: { ...(prev as any)[section], [key]: value } }));
+    } else {
+      setData(prev => ({ ...prev, [name]: value }));
+    }
   };
 
-  // --- Render Dynamic Builder Content (Steps 1 & 2) ---
-  const renderBuilderContent = (): React.ReactNode => {
-    switch (step) {
-      case 1:
-        return (
-          <div className="p-4 bg-white shadow-lg rounded-3">
-            <h1 className="fs-4 fw-bolder text-dark mb-4 border-bottom border-primary border-4 pb-2">Select Template</h1>
-            <div className="row g-4 w-100 justify-content-center">
-              {templates.map((t) => (
-                <div
-                  key={t.id}
-                  onClick={() => handleTemplateSelect(t.id)}
-                  className={`col-12 card p-4 border border-4 cursor-pointer shadow-lg transition-transform ${t.colorClass} ${t.bgColorClass} ${selectedTemplate === t.id ? 'border-success' : ''} h-100`}
-                  style={{cursor: 'pointer'}}
-                >
-                  <h2 className="fs-5 fw-bold text-dark">{t.name}</h2>
-                  <p className="fs-6 text-muted mt-2">{t.description}</p>
-                  <div className="fs-6 mt-3 text-secondary">
-                    <span className="fw-semibold">Format:</span> {t.columns}-Column
+  // Generic Array Handlers
+  const updateArray = (section: keyof ResumeData, index: number, field: string, value: string) => {
+    setData(prev => {
+      const newArr = [...(prev[section] as any[])];
+      newArr[index] = { ...newArr[index], [field]: value };
+      return { ...prev, [section]: newArr };
+    });
+  };
+
+  const addArrayItem = (section: keyof ResumeData, template: any) => {
+    setData(prev => ({ ...prev, [section]: [...(prev[section] as any[]), { ...template, id: Date.now().toString() }] }));
+  };
+
+  const removeArrayItem = (section: keyof ResumeData, index: number) => {
+    setData(prev => ({ ...prev, [section]: (prev[section] as any[]).filter((_, i) => i !== index) }));
+  };
+
+  // Print
+  const handlePrint = () => {
+    const printWindow = window.open('', '', 'width=900,height=1200');
+    if (!printWindow) return alert('Allow popups to print');
+    const content = document.getElementById('resume-page')?.innerHTML || '';
+    printWindow.document.write(`<html><head><title>${data.name}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"><style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Merriweather:wght@300;400;700&display=swap'); body { margin: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; } @page { margin: 0; size: auto; }</style></head><body>${content}</body></html>`);
+    printWindow.document.close();
+    setTimeout(() => { printWindow.focus(); printWindow.print(); printWindow.close(); }, 500);
+  };
+
+  // Score
+  const atsScore = useMemo(() => {
+    let score = 20;
+    if(data.name && data.email) score += 10;
+    if(data.summary.length > 50) score += 15;
+    if(data.experience.length > 0) score += 20;
+    if(data.education.length > 0) score += 15;
+    if(data.skills.technical.length > 10) score += 20;
+    return Math.min(100, score);
+  }, [data]);
+
+  if (isLoading) return <div className="vh-100 d-flex align-items-center justify-content-center"><div className="spinner-border text-primary" role="status"></div></div>;
+
+  return (
+    <div className="d-flex flex-column vh-100 overflow-hidden bg-light">
+      {/* --- NAVBAR --- */}
+      <nav className="navbar navbar-light bg-white border-bottom px-4 py-2 z-3 shadow-sm" style={{ height: '64px' }}>
+        <div className="d-flex align-items-center gap-2">
+          <div className="bg-dark rounded text-white p-1"><i className="bi bi-file-text fs-5"></i></div>
+          <h6 className="fw-bold mb-0 text-dark">Resume Editor</h6>
+        </div>
+        <div className="mx-auto d-flex align-items-center gap-3">
+          <div className="d-flex align-items-center gap-2 bg-light px-3 py-1 rounded-pill border">
+            <span className="small fw-bold text-secondary">Completion:</span>
+            <div className="progress" style={{ width: '60px', height: '6px' }}>
+              <div className={`progress-bar ${atsScore > 80 ? 'bg-success' : 'bg-primary'}`} style={{ width: `${atsScore}%` }}></div>
+            </div>
+            <span className="small fw-bold text-dark">{atsScore}%</span>
+          </div>
+        </div>
+        <div className="d-flex gap-2">
+          <div className="btn-group">
+            <button className={`btn btn-sm ${template === 'professional' ? 'btn-dark' : 'btn-outline-secondary'}`} onClick={() => setTemplate('professional')}>Pro</button>
+            <button className={`btn btn-sm ${template === 'modern' ? 'btn-dark' : 'btn-outline-secondary'}`} onClick={() => setTemplate('modern')}>Modern</button>
+            <button className={`btn btn-sm ${template === 'minimal' ? 'btn-dark' : 'btn-outline-secondary'}`} onClick={() => setTemplate('minimal')}>Clean</button>
+          </div>
+          <button className="btn btn-primary btn-sm fw-medium shadow-sm" onClick={handlePrint}><i className="bi bi-download me-2"></i>Download</button>
+        </div>
+      </nav>
+
+      {/* --- EDITOR WORKSPACE --- */}
+      <div className="row g-0 h-100 overflow-hidden">
+        {/* LEFT EDITOR */}
+        <div className="col-lg-4 col-xl-3 h-100 border-end bg-white overflow-y-auto custom-scrollbar p-4 pb-5">
+          
+          {/* Personal Details */}
+          <div className="mb-4">
+            <label className="form-label"><i className="bi bi-person me-1"></i> Personal Details</label>
+            <div className="card border-0 bg-light p-3">
+              <div className="row g-2">
+                <div className="col-12"><input name="name" className="form-control" placeholder="Full Name" value={data.name} onChange={updateField} /></div>
+                <div className="col-12"><input name="jobTitle" className="form-control" placeholder="Target Job Title" value={data.jobTitle} onChange={updateField} /></div>
+                <div className="col-6"><input name="email" className="form-control" placeholder="Email" value={data.email} onChange={updateField} /></div>
+                <div className="col-6"><input name="phone" className="form-control" placeholder="Phone" value={data.phone} onChange={updateField} /></div>
+                <div className="col-12"><input name="linkedin" className="form-control" placeholder="LinkedIn URL" value={data.linkedin} onChange={updateField} /></div>
+                <div className="col-12"><input name="website" className="form-control" placeholder="Portfolio Website" value={data.website} onChange={updateField} /></div>
+              </div>
+            </div>
+          </div>
+
+          {/* Summary */}
+          <div className="mb-4">
+            <label className="form-label"><i className="bi bi-text-paragraph me-1"></i> Professional Summary</label>
+            <textarea name="summary" className="form-control bg-light border-0" rows={4} value={data.summary} onChange={updateField} />
+          </div>
+
+          {/* Experience */}
+          <div className="mb-4">
+            <div className="d-flex justify-content-between align-items-center mb-2">
+              <label className="form-label mb-0"><i className="bi bi-briefcase me-1"></i> Experience</label>
+              <button className="btn btn-xs btn-outline-primary rounded-pill py-0" onClick={() => addArrayItem('experience', {title:'Title',company:'Company',years:'',bullets:''})}>+ Add</button>
+            </div>
+            <div className="accordion accordion-flush" id="expAccordion">
+              {data.experience.map((exp, i) => (
+                <div className="accordion-item bg-transparent" key={exp.id}>
+                  <h2 className="accordion-header">
+                    <button className="accordion-button collapsed py-2 bg-light rounded-2 mb-1 border" type="button" data-bs-toggle="collapse" data-bs-target={`#exp${exp.id}`}>
+                      <span className="fw-bold text-dark small text-truncate">{exp.title || 'New Role'}</span>
+                    </button>
+                  </h2>
+                  <div id={`exp${exp.id}`} className="accordion-collapse collapse" data-bs-parent="#expAccordion">
+                    <div className="accordion-body p-2">
+                      <input className="form-control mb-2" placeholder="Title" value={exp.title} onChange={e => updateArray('experience', i, 'title', e.target.value)} />
+                      <input className="form-control mb-2" placeholder="Company" value={exp.company} onChange={e => updateArray('experience', i, 'company', e.target.value)} />
+                      <div className="row g-2 mb-2">
+                        <div className="col-6"><input className="form-control" placeholder="Dates" value={exp.years} onChange={e => updateArray('experience', i, 'years', e.target.value)} /></div>
+                        <div className="col-6"><input className="form-control" placeholder="Type (Full-time)" value={exp.employmentType} onChange={e => updateArray('experience', i, 'employmentType', e.target.value)} /></div>
+                      </div>
+                      <textarea className="form-control mb-2" rows={3} placeholder="Description..." value={exp.bullets} onChange={e => updateArray('experience', i, 'bullets', e.target.value)} />
+                      <button className="btn btn-link text-danger btn-sm p-0" onClick={() => removeArrayItem('experience', i)}>Delete</button>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
           </div>
-        );
-      case 2:
-        return (
-            <div className="mt-4">
-                {/* Title is rendered inside ResumeForm */}
-                <ResumeForm data={resumeData} setData={setResumeData} goNext={() => setStep(3)} />
+
+          {/* Education */}
+          <div className="mb-4">
+            <div className="d-flex justify-content-between align-items-center mb-2">
+              <label className="form-label mb-0"><i className="bi bi-mortarboard me-1"></i> Education</label>
+              <button className="btn btn-xs btn-outline-primary rounded-pill py-0" onClick={() => addArrayItem('education', {institution:'School',degree:'Degree',years:''})}>+ Add</button>
             </div>
-        );
-      default:
-        return null;
-    }
-  };
-
-  // --- Render Dynamic Review Content (Step 3) ---
-  const renderReviewContent = (): React.ReactNode => {
-    if (step !== 3) return null;
-    
-    return (
-      <div className="p-4 bg-white shadow-lg rounded-3 text-center">
-        <h1 className="fs-3 fw-bolder text-dark mb-4">3. Check Score & Download</h1>
-
-        {/* ATS Score Display */}
-        <div className={`p-4 rounded-3 d-inline-block mb-4 shadow-lg ${atsScore >= 80 ? 'bg-success-subtle border border-success' : atsScore >= 60 ? 'bg-warning-subtle border border-warning' : 'bg-danger-subtle border border-danger'}`}>
-          <p className="fs-1 fw-bolder mb-0">
-            {atsScore}<span className="fs-4">%</span>
-          </p>
-          <p className="fs-5 fw-semibold mt-1">
-            ATS Score Match
-          </p>
-          <p className="fs-6 mt-1 text-muted">
-            {atsScore >= 80 ? "Excellent! Your resume is highly parsable and optimized for keywords." : atsScore >= 60 ? "Good. Review your bullet points for more action verbs and numbers." : "Needs Attention. Use clearer headings and ensure all sections are complete."}
-          </p>
-        </div>
-
-        <div className="d-flex justify-content-center gap-3 mb-3">
-          <button
-            onClick={() => setStep(2)}
-            className="btn btn-secondary shadow-sm"
-          >
-            ← Go Back to Edit Details
-          </button>
-          <button
-            onClick={handlePrintPDF}
-            className="btn btn-danger btn-lg fw-bold shadow-lg"
-          >
-            Print/Save as PDF (Preserves Visual Style)
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="bg-light min-vh-100 p-4">
-      {/* Custom Message Box for Feedback */}
-      <div id="messageBox" className="position-fixed top-0 end-0 m-3 bg-info text-white p-3 rounded-3 shadow-lg z-3"></div>
-
-      <div className="container-fluid">
-        <div className="row g-4">
-
-          {/* Left Side: Controls & Score (The Sidebar) */}
-          <div className="col-lg-4">
-            
-            {/* ---------------------------------------------------- */}
-            {/* FIRST SECTION: STEP NAVIGATION (Always Visible)      */}
-            {/* ---------------------------------------------------- */}
-            <div className="bg-white p-4 rounded-3 shadow-lg mb-4">
-              <h1 className="fs-4 fw-bold mb-3 text-primary">Resume Builder Steps</h1>
-              <ol className="list-unstyled">
-                <li className={`p-3 rounded-3 border-start border-4 mb-2 ${step === 1 ? 'bg-light border-primary fw-semibold' : 'text-muted'}`} onClick={() => setStep(1)} style={{cursor: 'pointer'}}>
-                  1. Select Template (Current: <span className="text-primary">{currentTemplate.name}</span>)
-                </li>
-                <li className={`p-3 rounded-3 border-start border-4 mb-2 ${step === 2 ? 'bg-light border-primary fw-semibold' : 'text-muted'}`} onClick={() => setStep(2)} style={{cursor: 'pointer'}}>
-                  2. Fill Resume Content
-                </li>
-                <li className={`p-3 rounded-3 border-start border-4 ${step === 3 ? 'bg-light border-primary fw-semibold' : 'text-muted'}`} onClick={() => setStep(3)} style={{cursor: 'pointer'}}>
-                  3. Check Score & Download
-                </li>
-              </ol>
+            <div className="accordion accordion-flush" id="eduAccordion">
+              {data.education.map((edu, i) => (
+                <div className="accordion-item bg-transparent" key={edu.id}>
+                  <h2 className="accordion-header">
+                    <button className="accordion-button collapsed py-2 bg-light rounded-2 mb-1 border" type="button" data-bs-toggle="collapse" data-bs-target={`#edu${edu.id}`}>
+                      <span className="fw-bold text-dark small text-truncate">{edu.institution || 'New School'}</span>
+                    </button>
+                  </h2>
+                  <div id={`edu${edu.id}`} className="accordion-collapse collapse" data-bs-parent="#eduAccordion">
+                    <div className="accordion-body p-2">
+                      <input className="form-control mb-2" placeholder="School" value={edu.institution} onChange={e => updateArray('education', i, 'institution', e.target.value)} />
+                      <input className="form-control mb-2" placeholder="Degree" value={edu.degree} onChange={e => updateArray('education', i, 'degree', e.target.value)} />
+                      <div className="row g-2 mb-2">
+                        <div className="col-8"><input className="form-control" placeholder="Years" value={edu.years} onChange={e => updateArray('education', i, 'years', e.target.value)} /></div>
+                        <div className="col-4"><input className="form-control" placeholder="GPA" value={edu.grade} onChange={e => updateArray('education', i, 'grade', e.target.value)} /></div>
+                      </div>
+                      <button className="btn btn-link text-danger btn-sm p-0" onClick={() => removeArrayItem('education', i)}>Delete</button>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
-            
-            {/* ---------------------------------------------------- */}
-            {/* SECOND SECTION: BUILDER CONTENT (Steps 1 & 2)      */}
-            {/* ---------------------------------------------------- */}
-            {step < 3 && (
-                <div className="mb-4">
-                    {renderBuilderContent()}
-                </div>
-            )}
-            
-            {/* ---------------------------------------------------- */}
-            {/* THIRD SECTION: REVIEW CONTENT (Step 3)             */}
-            {/* ---------------------------------------------------- */}
-            {step === 3 && (
-                <div className="mb-4">
-                    {renderReviewContent()}
-                </div>
-            )}
-
           </div>
 
-          {/* Right Side: Resume Preview */}
-          <div className="col-lg-8">
-            <h2 className="fs-4 fw-bold text-dark mb-3 border-bottom pb-2">Live Resume Preview: {currentTemplate.name}</h2>
-            <div className="bg-white rounded-3 overflow-hidden" id="resume-preview">
-              <ResumeComponent data={resumeData} accentColor={currentTemplate.colorClass} />
+          {/* Certifications */}
+          <div className="mb-4">
+            <div className="d-flex justify-content-between align-items-center mb-2">
+              <label className="form-label mb-0"><i className="bi bi-award me-1"></i> Certifications</label>
+              <button className="btn btn-xs btn-outline-primary rounded-pill py-0" onClick={() => addArrayItem('certifications', {name:'Cert Name',issuer:'Issuer',date:''})}>+ Add</button>
+            </div>
+            {data.certifications.map((cert, i) => (
+              <div key={cert.id} className="bg-light p-2 rounded border mb-2 position-relative">
+                <input className="form-control mb-1" placeholder="Name" value={cert.name} onChange={e => updateArray('certifications', i, 'name', e.target.value)} />
+                <div className="row g-1">
+                  <div className="col-7"><input className="form-control" placeholder="Issuer" value={cert.issuer} onChange={e => updateArray('certifications', i, 'issuer', e.target.value)} /></div>
+                  <div className="col-5"><input className="form-control" placeholder="Date" value={cert.date} onChange={e => updateArray('certifications', i, 'date', e.target.value)} /></div>
+                </div>
+                <button className="btn-close position-absolute top-0 end-0 m-1" style={{fontSize: '0.6rem'}} onClick={() => removeArrayItem('certifications', i)}></button>
+              </div>
+            ))}
+          </div>
+
+          {/* Languages */}
+          <div className="mb-4">
+            <div className="d-flex justify-content-between align-items-center mb-2">
+              <label className="form-label mb-0"><i className="bi bi-translate me-1"></i> Languages</label>
+              <button className="btn btn-xs btn-outline-primary rounded-pill py-0" onClick={() => addArrayItem('languages', {language:'', proficiency:''})}>+ Add</button>
+            </div>
+            {data.languages.map((lang, i) => (
+              <div key={lang.id} className="d-flex gap-2 mb-2">
+                <input className="form-control" placeholder="Language" value={lang.language} onChange={e => updateArray('languages', i, 'language', e.target.value)} />
+                <input className="form-control" placeholder="Level" value={lang.proficiency} onChange={e => updateArray('languages', i, 'proficiency', e.target.value)} />
+                <button className="btn btn-outline-danger" onClick={() => removeArrayItem('languages', i)}><i className="bi bi-trash"></i></button>
+              </div>
+            ))}
+          </div>
+
+          {/* Skills */}
+          <div className="mb-5">
+            <label className="form-label"><i className="bi bi-tools me-1"></i> Skills</label>
+            <div className="bg-light p-3 rounded border">
+              <label className="small text-muted fw-bold mb-1">Technical</label>
+              <input name="skills.technical" className="form-control mb-2" value={data.skills.technical} onChange={updateField} />
+              <label className="small text-muted fw-bold mb-1">Soft Skills</label>
+              <input name="skills.soft" className="form-control" value={data.skills.soft} onChange={updateField} />
+            </div>
+          </div>
+        </div>
+
+        {/* RIGHT: PREVIEW */}
+        <div className="col-lg-8 col-xl-9 h-100 bg-secondary bg-opacity-10 d-flex flex-column align-items-center overflow-hidden position-relative">
+          <div className="position-absolute bottom-4 start-50 translate-middle-x bg-dark text-white px-3 py-2 rounded-pill shadow-lg z-3 d-flex align-items-center gap-3">
+            <button className="btn btn-link text-white p-0" onClick={() => setZoom(z => Math.max(0.4, z - 0.1))}><i className="bi bi-dash"></i></button>
+            <span className="small fw-bold" style={{minWidth: '40px', textAlign: 'center'}}>{Math.round(zoom * 100)}%</span>
+            <button className="btn btn-link text-white p-0" onClick={() => setZoom(z => Math.min(1.2, z + 0.1))}><i className="bi bi-plus"></i></button>
+          </div>
+
+          <div className="overflow-auto w-100 h-100 d-flex justify-content-center pt-5 pb-5 custom-scrollbar">
+            <div className="a4-paper" id="resume-page" style={{ transform: `scale(${zoom})`, marginBottom: `${(1 - zoom) * -100}%` }}>
+              {template === 'modern' ? <TemplateModern data={data} /> : template === 'minimal' ? <TemplateMinimal data={data} /> : <TemplateProfessional data={data} />}
             </div>
           </div>
         </div>

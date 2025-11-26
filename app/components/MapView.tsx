@@ -2,7 +2,7 @@
 
 import { FC, useState, useEffect, useMemo, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { collection, query, onSnapshot, orderBy, addDoc } from "firebase/firestore";
+import { collection, query, onSnapshot, orderBy, addDoc, serverTimestamp } from "firebase/firestore";
 import { useAuth } from "@/app/page";
 import { db } from "@/app/lib/firebase";
 import { LatLngTuple } from "leaflet";
@@ -43,9 +43,13 @@ interface JobPostWithCoords {
   id: string;
   jobTitle: string;
   companyName: string;
+  companyId: string;
   city: string;
   description: string;
   coordinates: LatLngTuple; // [lat, lng]
+  requirements?: string[];
+  salary?: string;
+  jobType?: string;
 }
 
 const calculateDistance = (
@@ -150,7 +154,7 @@ const DynamicJobMap = dynamic(
 // 4. Main Map View Component
 // ====================================================
 export const MapView: FC = () => {
-  const { setError, clearError } = useAuth();
+  const { user, setError, clearError } = useAuth();
   const [allJobs, setAllJobs] = useState<JobPostWithCoords[]>([]);
   const [loading, setLoading] = useState(true);
   const [userLocation, setUserLocation] = useState<LatLngTuple | null>(null);
@@ -194,9 +198,15 @@ export const MapView: FC = () => {
 
             return {
               id: d.id,
-              ...data,
-              city,
+              jobTitle: data.jobTitle || "Untitled Position",
+              companyName: data.companyName || "Unknown Company",
+              companyId: data.companyId || "",
+              city: city,
+              description: data.description || "No description available",
               coordinates,
+              requirements: data.requirements || [],
+              salary: data.salary || "Not specified",
+              jobType: data.jobType || "Full-time",
             } as JobPostWithCoords;
           });
           setAllJobs(fetchedJobs);
@@ -272,21 +282,77 @@ export const MapView: FC = () => {
     return result;
   }, [allJobs, searchTerm, cityFilter, nearbyFilter, userLocation, setError]);
 
-  // Apply for job
+  // Apply for job - FIXED VERSION
   const handleApply = async () => {
-    if (!selectedJob) return;
+    if (!selectedJob || !user) {
+      setError("Please log in to apply for jobs.");
+      return;
+    }
+
     try {
       setApplying(true);
-      await addDoc(collection(db, "jobApplications"), {
+      clearError();
+
+      // Get user data from artifacts or use basic info
+      let userName = user.displayName || "Unknown User";
+      let userEmail = user.email || "";
+      let userSkills: string[] = [];
+      let userExperience = "Not specified";
+      let userEducation = "Not specified";
+      let userResumeUrl = "";
+
+      // Try to fetch user profile data from artifacts
+      try {
+        const { getDoc, doc } = await import("firebase/firestore");
+        const userDoc = await getDoc(doc(db, "artifacts", user.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          userName = userData.displayName || userData.name || userName;
+          userEmail = userData.email || userEmail;
+          userSkills = userData.skills || userData.tags || [];
+          userExperience = userData.experience || userData.workExperience || userExperience;
+          userEducation = userData.education || userEducation;
+          userResumeUrl = userData.resumeUrl || userData.cvUrl || userResumeUrl;
+        }
+      } catch (profileError) {
+        console.log("Using basic user data for application");
+      }
+
+      // Create the job application with all required fields
+      const applicationData = {
         jobId: selectedJob.id,
         jobTitle: selectedJob.jobTitle,
+        companyId: selectedJob.companyId,
         companyName: selectedJob.companyName,
-        appliedAt: new Date(),
-      });
+        userId: user.uid,
+        userName: userName,
+        userEmail: userEmail,
+        userPhone: user.phoneNumber || "Not provided",
+        userSkills: userSkills,
+        userExperience: userExperience,
+        userEducation: userEducation,
+        userResumeUrl: userResumeUrl,
+        status: "Submitted",
+        appliedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+
+      await addDoc(collection(db, "jobApplications"), applicationData);
+      
       setApplied(true);
       setApplying(false);
-    } catch (error) {
-      setError("Failed to submit job application.");
+      setError("Application submitted successfully!", false);
+      
+      // Auto-close modal after 2 seconds
+      setTimeout(() => {
+        setSelectedJob(null);
+        setApplied(false);
+      }, 2000);
+      
+    } catch (error: any) {
+      console.error("Application error:", error);
+      setError("Failed to submit job application: " + (error.message || "Unknown error"));
       setApplying(false);
     }
   };
@@ -368,7 +434,7 @@ export const MapView: FC = () => {
           </div>
         </div>
 
-        {/* Job Details Modal */}
+        {/* Job Details Modal - IMPROVED VERSION */}
         {selectedJob && (
           <div
             className="modal fade show"
@@ -376,40 +442,126 @@ export const MapView: FC = () => {
               display: "block",
               background: "rgba(0,0,0,0.5)",
             }}
+            tabIndex={-1}
           >
-            <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-dialog modal-dialog-centered modal-lg">
               <div className="modal-content">
-                <div className="modal-header">
+                <div className="modal-header bg-primary text-white">
                   <h5 className="modal-title">
-                    {selectedJob.jobTitle} — {selectedJob.companyName}
+                    <i className="bi bi-briefcase me-2"></i>
+                    {selectedJob.jobTitle}
                   </h5>
                   <button
-                    className="btn-close"
+                    className="btn-close btn-close-white"
                     onClick={() => {
                       setSelectedJob(null);
                       setApplied(false);
                     }}
+                    disabled={applying}
                   ></button>
                 </div>
                 <div className="modal-body">
-                  <p>
-                    <strong>City:</strong> {selectedJob.city}
-                  </p>
-                  <p>{selectedJob.description}</p>
-
-                  {!applied ? (
-                    <button
-                      className="btn btn-primary w-100"
-                      onClick={handleApply}
-                      disabled={applying}
-                    >
-                      {applying ? "Submitting..." : "Apply Now"}
-                    </button>
-                  ) : (
-                    <div className="alert alert-success mt-3">
-                      ✅ Your application has been submitted successfully!
+                  <div className="row">
+                    <div className="col-md-8">
+                      <h6 className="text-primary">{selectedJob.companyName}</h6>
+                      <div className="mb-3">
+                        <span className="badge bg-secondary me-2">
+                          <i className="bi bi-geo-alt me-1"></i>
+                          {selectedJob.city}
+                        </span>
+                        <span className="badge bg-info me-2">
+                          <i className="bi bi-clock me-1"></i>
+                          {selectedJob.jobType}
+                        </span>
+                        {selectedJob.salary && (
+                          <span className="badge bg-success">
+                            <i className="bi bi-currency-dollar me-1"></i>
+                            {selectedJob.salary}
+                          </span>
+                        )}
+                      </div>
+                      
+                      <h6>Job Description:</h6>
+                      <p className="text-muted">{selectedJob.description}</p>
+                      
+                      {selectedJob.requirements && selectedJob.requirements.length > 0 && (
+                        <>
+                          <h6>Requirements:</h6>
+                          <ul className="list-unstyled">
+                            {selectedJob.requirements.map((req, index) => (
+                              <li key={index} className="mb-1">
+                                <i className="bi bi-check-circle text-success me-2"></i>
+                                {req}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
                     </div>
-                  )}
+                    
+                    <div className="col-md-4 border-start">
+                      <div className="sticky-top" style={{ top: '20px' }}>
+                        <h6>Quick Apply</h6>
+                        <div className="alert alert-info small">
+                          <i className="bi bi-info-circle me-2"></i>
+                          Your profile information will be used for this application.
+                        </div>
+                        
+                        {!user ? (
+                          <div className="alert alert-warning">
+                            <i className="bi bi-exclamation-triangle me-2"></i>
+                            Please log in to apply for this position.
+                          </div>
+                        ) : !applied ? (
+                          <button
+                            className="btn btn-primary w-100 mb-2"
+                            onClick={handleApply}
+                            disabled={applying}
+                          >
+                            {applying ? (
+                              <>
+                                <i className="bi bi-arrow-clockwise animate-spin me-2"></i>
+                                Submitting...
+                              </>
+                            ) : (
+                              <>
+                                <i className="bi bi-send me-2"></i>
+                                Apply Now
+                              </>
+                            )}
+                          </button>
+                        ) : (
+                          <div className="alert alert-success">
+                            <i className="bi bi-check-circle me-2"></i>
+                            Application Submitted!
+                          </div>
+                        )}
+                        
+                        <div className="small text-muted mt-3">
+                          <p><strong>Application includes:</strong></p>
+                          <ul className="small">
+                            <li>Your profile information</li>
+                            <li>Skills and experience</li>
+                            <li>Education background</li>
+                            <li>Resume (if available)</li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => {
+                      setSelectedJob(null);
+                      setApplied(false);
+                    }}
+                    disabled={applying}
+                  >
+                    Close
+                  </button>
                 </div>
               </div>
             </div>

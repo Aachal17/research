@@ -1,5 +1,3 @@
-// src/app/page.tsx
-
 "use client";
 import {
     createUserWithEmailAndPassword,
@@ -11,72 +9,90 @@ import {
     updateProfile,
     User,
 } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore'; 
+import { doc, getDoc, collection, getDocs, query, where } from 'firebase/firestore'; 
 import React, { createContext, FC, ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 
 // ===============================================
-// 1. FIREBASE & UTILITY IMPORTS
+// 1. FIREBASE & IMPORTS
 // ===============================================
 import { auth, db, googleProvider, createInitialUserData } from '@/app/lib/firebase';
-import Profile from '@/app/components/Profile'; // Import the new Profile component
+import Profile from '@/app/components/Profile';
 import ResumeBuilder from '@/app/components/Resume';
-// NEW IMPORT: Company components
 import { CompanyLoginCard, CompanyRegisterCard, CompanyDashboard } from '@/app/company/page';
 import { JobSearch } from '@/app/components/JobSearch'; 
-import { MapView } from '@/app/components/MapView'; // <- ADD THIS
+import { MapView } from '@/app/components/MapView';
 import { SavedJobs } from '@/app/components/SavedJobs';
 import { Applications } from '@/app/components/Applications';
+import { ExploreOpportunities } from '@/app/components/ExploreOpportunities';
 
+const Hero = "https://placehold.co/700x500/e0e7ff/4338ca?text=JobMap+AI";
 
 // ===============================================
-// 2. AUTH CONTEXT
+// 2. UI ATOMS (THE DESIGN SYSTEM)
 // ===============================================
 
-// --- Type Definitions ---
+const GlassCard: FC<{ children: ReactNode; className?: string; onClick?: () => void }> = ({ children, className = "", onClick }) => (
+    <div 
+        onClick={onClick}
+        className={`bg-white rounded-2xl shadow-sm border border-gray-100 ${onClick ? 'cursor-pointer' : ''} ${className}`}
+    >
+        {children}
+    </div>
+);
+
+const SectionHeader: FC<{ title: string; subtitle?: string }> = ({ title, subtitle }) => (
+    <div className="mb-6">
+        <h2 className="text-2xl font-bold text-gray-800 mb-2">{title}</h2>
+        {subtitle && <p className="text-gray-600 text-lg">{subtitle}</p>}
+    </div>
+);
+
+const PrimaryButton: FC<React.ButtonHTMLAttributes<HTMLButtonElement>> = ({ className, children, ...props }) => (
+    <button 
+        className={`bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl font-semibold shadow-md border-0 ${className}`}
+        {...props}
+    >
+        {children}
+    </button>
+);
+
+// ===============================================
+// 3. AUTH CONTEXT & UTILS
+// ===============================================
+
 interface AuthContextType {
     user: User | null;
-    auth: typeof auth;
-    db: typeof db;
     loading: boolean;
     error: string | null;
     setError: (message: string, isError?: boolean) => void;
     clearError: () => void;
+    auth: typeof auth;
+    db: typeof db;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const useAuth = () => {
     const context = useContext(AuthContext);
-    if (!context) {
-        throw new Error('useAuth must be used within an AuthProvider');
-    }
+    if (!context) throw new Error('useAuth must be used within an AuthProvider');
     return context;
 };
 
-interface AuthProviderProps {
-    children: ReactNode;
-}
-
-// AuthProvider Component
-export const AuthProvider: FC<AuthProviderProps> = ({ children }) => {
+export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
     const [user, setUser] = useState<User | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setErrorState] = useState<string | null>(null);
+    const [isError, setIsErrorState] = useState(false);
 
     const setError = useCallback((message: string, isError: boolean = true) => {
-        if (isError) {
-            console.warn(message);
-        } else {
-            console.log(message);
-        }
         setErrorState(message);
-        if (!isError) {
-            setTimeout(() => setErrorState(null), 5000);
-        }
+        setIsErrorState(isError);
+        if (!isError) setTimeout(() => setErrorState(null), 4000);
     }, []);
 
     const clearError = useCallback(() => {
         setErrorState(null);
+        setIsErrorState(false);
     }, []);
 
     useEffect(() => {
@@ -91,160 +107,174 @@ export const AuthProvider: FC<AuthProviderProps> = ({ children }) => {
             }
         };
 
-        const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-            setUser(currentUser);
-            setLoading(false);
+        initialSignIn().then(() => {
+            const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+                setUser(currentUser);
+                setLoading(false);
+            });
+            return () => unsubscribe();
         });
+    }, []);
 
-        if(loading) initialSignIn();
-        return () => unsubscribe();
-    }, [loading]);
-
-    const contextValue: AuthContextType = {
-        user,
-        auth,
-        db,
-        loading,
-        error,
-        setError,
-        clearError,
-    };
     return (
-        <AuthContext.Provider value={contextValue}>
+        <AuthContext.Provider value={{ user, loading, error, setError, clearError, auth, db }}>
             {children}
+            {error && (
+                <div className={`fixed bottom-5 right-5 px-6 py-3 rounded-xl shadow-2xl text-white z-50 ${isError ? 'bg-red-500' : 'bg-green-500'}`}>
+                    <div className="flex items-center gap-3">
+                        <i className={`bi ${isError ? 'bi-exclamation-circle-fill' : 'bi-check-circle-fill'}`}></i>
+                        <span className="font-medium">{error}</span>
+                        <button onClick={clearError} className="ml-2 opacity-75 hover:opacity-100">×</button>
+                    </div>
+                </div>
+            )}
         </AuthContext.Provider>
     );
 };
 
+// ===============================================
+// 4. AUTH & ONBOARDING CARDS
+// ===============================================
 
-// ===============================================
-// 3. SHARED CUSTOM ALERT
-// ===============================================
-export const CustomAlert: FC<{ message: string, onClose: () => void, isError: boolean }> = ({ message, onClose, isError }) => (
-    <div className={`fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-50 transition-all duration-500 transform ${isError ? 'bg-red-600' : 'bg-green-600'}`}>
-        <div className="flex justify-between items-center">
-            <span>{isError ? 'Error: ' : 'Success: '}{message}</span>
-            <button onClick={onClose} className="ml-4 font-bold">×</button>
+const AuthCardWrapper: FC<{ title: string; subtitle: string; children: ReactNode }> = ({ title, subtitle, children }) => (
+    <GlassCard className="max-w-md w-full mx-auto">
+        <div className="p-8">
+            <div className="text-center mb-6">
+                <div className="bg-gradient-to-r from-indigo-500 to-purple-500 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 text-white shadow-lg">
+                    <i className="bi bi-briefcase-fill text-2xl"></i>
+                </div>
+                <h3 className="text-2xl font-bold text-gray-800 mb-2">{title}</h3>
+                <p className="text-gray-600">{subtitle}</p>
+            </div>
+            {children}
         </div>
-    </div>
+    </GlassCard>
 );
 
-
-// ===============================================
-// 4. LOGIN CARD (Job Seeker)
-// ===============================================
-
-interface LoginCardProps {
-    switchToRegister: () => void;
-}
-
-export const LoginCard: FC<LoginCardProps> = ({ switchToRegister }) => {
+export const LoginCard: FC<{ switchToRegister: () => void }> = ({ switchToRegister }) => {
     const { auth, setError, clearError } = useAuth();
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
-    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [loading, setLoading] = useState(false);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
         clearError();
-        setIsSubmitting(true);
+        setLoading(true);
         try {
             await signInWithEmailAndPassword(auth, email, password);
-            setError('Login successful! Redirecting to Dashboard.', false);
-        } catch (error) {
-            console.error('Login Error:', error);
-            setError(`Login failed: ${(error as any).message || 'Invalid credentials'}`);
+            setError('Login successful!', false);
+        } catch (err: any) {
+            setError(err.message, true);
         } finally {
-            setIsSubmitting(false);
+            setLoading(false);
         }
     };
 
     const handleGoogleLogin = async () => {
         clearError();
-        setIsSubmitting(true);
-
+        setLoading(true);
         try {
             await signInWithPopup(auth, googleProvider);
-            setError('Successfully logged in with Google!', false);
-        } catch (error) {
-            console.error('Google Login Error:', error);
-            setError('Google sign-in failed. Please try again.');
+            setError('Google login successful!', false);
+        } catch (err: any) {
+            setError(err.message, true);
         } finally {
-            setIsSubmitting(false);
+            setLoading(false);
         }
     };
 
     return (
-        <div className="card shadow-xl p-4 p-md-5 transition-transform duration-300 hover:shadow-2xl hover:scale-[1.01]" style={{ maxWidth: '450px', width: '100%' }}>
-            <div className="card-body text-center">
-                <h2 className="card-title text-primary fw-bold mb-1">Welcome Back (Job Seeker)</h2>
-                <p className="card-subtitle text-muted mb-4">Sign in to continue your job search</p>
-
-                <form onSubmit={handleLogin}>
-                    <div className="mb-3 text-start">
-                        <label htmlFor="loginEmail" className="form-label">Email</label>
-                        <input type="email" className="form-control" id="loginEmail" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" required />
+        <AuthCardWrapper title="Welcome Back" subtitle="Sign in to your account">
+            <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                    <label className="form-label text-gray-700 font-medium">Email</label>
+                    <input 
+                        type="email" 
+                        className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                        placeholder="name@example.com" 
+                        value={email} 
+                        onChange={e => setEmail(e.target.value)} 
+                        required 
+                    />
+                </div>
+                <div>
+                    <label className="form-label text-gray-700 font-medium">Password</label>
+                    <input 
+                        type="password" 
+                        className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                        placeholder="Your password" 
+                        value={password} 
+                        onChange={e => setPassword(e.target.value)} 
+                        required 
+                    />
+                </div>
+                <PrimaryButton type="submit" disabled={loading} className="w-full py-3">
+                    {loading ? (
+                        <><i className="bi bi-arrow-clockwise animate-spin me-2"></i> Signing In...</>
+                    ) : (
+                        'Sign In'
+                    )}
+                </PrimaryButton>
+            </form>
+            
+            <div className="text-center mt-6">
+                <div className="relative mb-4">
+                    <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-gray-200"></div>
                     </div>
-                    <div className="mb-4 text-start">
-                        <label htmlFor="loginPassword" className="form-label">Password</label>
-                        <input type="password" className="form-control" id="loginPassword" value={password} onChange={(e) => setPassword(e.target.value)} required />
+                    <div className="relative flex justify-center text-sm">
+                        <span className="px-2 bg-white text-gray-500">Or continue with</span>
                     </div>
-                    <button type="submit" className="btn btn-primary w-100 mb-3 transition-all duration-200 hover:opacity-90" disabled={isSubmitting}>
-                        {isSubmitting ? 'Signing In...' : 'Sign In'}
-                    </button>
-                </form>
-                <p className="text-muted small my-3">OR CONTINUE WITH</p>
-                <button
-                    className="btn btn-outline-secondary w-100 
-d-flex align-items-center justify-content-center mb-4 transition-all duration-200 hover:bg-gray-100"
-                    onClick={handleGoogleLogin}
-                    disabled={isSubmitting}
+                </div>
+                
+                <button 
+                    onClick={handleGoogleLogin} 
+                    disabled={loading}
+                    className="w-full flex items-center justify-center gap-3 py-3 px-4 border border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50"
                 >
-                    <i className="bi bi-google me-2"></i> Google
+                    <i className="bi bi-google text-red-500"></i>
+                    Continue with Google
                 </button>
-                <p className="small text-muted mb-0">
-                    Don't have an account?
-                    <a href="#" onClick={(e) => { e.preventDefault(); switchToRegister(); }} className="text-primary fw-bold text-decoration-none hover:text-indigo-600 transition-colors">Sign Up</a>
+                
+                <p className="mt-6 text-gray-600">
+                    Don't have an account?{' '}
+                    <button 
+                        onClick={switchToRegister} 
+                        className="text-indigo-600 font-semibold hover:text-indigo-700"
+                    >
+                        Sign up
+                    </button>
                 </p>
             </div>
-        </div>
+        </AuthCardWrapper>
     );
 };
 
-
-// ===============================================
-// 5. REGISTER CARD (Job Seeker)
-// ===============================================
-
-interface RegisterCardProps {
-    switchToLogin: () => void;
-}
-
-export const RegisterCard: FC<RegisterCardProps> = ({ switchToLogin }) => {
+export const RegisterCard: FC<{ switchToLogin: () => void }> = ({ switchToLogin }) => {
     const { auth, setError, clearError } = useAuth();
     const [firstName, setFirstName] = useState('');
     const [lastName, setLastName] = useState('');
-    const [mobileNumber, setMobileNumber] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
-    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [loading, setLoading] = useState(false);
 
     const handleRegister = async (e: React.FormEvent) => {
         e.preventDefault();
         clearError();
-        setIsSubmitting(true);
-        if (password.length < 8) {
-            setError('Password must be at least 8 characters.');
-            setIsSubmitting(false);
+        
+        if (password !== confirmPassword) {
+            setError('Passwords do not match', true);
             return;
         }
-        if (password !== confirmPassword) {
-            setError('Passwords do not match.');
-            setIsSubmitting(false);
+        
+        if (password.length < 8) {
+            setError('Password must be at least 8 characters', true);
             return;
         }
 
+        setLoading(true);
         try {
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
             const user = userCredential.user;
@@ -252,774 +282,1076 @@ export const RegisterCard: FC<RegisterCardProps> = ({ switchToLogin }) => {
 
             await updateProfile(user, { displayName });
             await createInitialUserData(user.uid, displayName, user.email);
-            setError('Account created successfully! You are now logged in.', false);
-
-        } catch (error) {
-            console.error('Registration Error:', error);
-            setError(`Registration failed: ${(error as any).message || 'An unknown error occurred'}`);
+            setError('Account created successfully!', false);
+        } catch (err: any) {
+            setError(err.message, true);
         } finally {
-            setIsSubmitting(false);
+            setLoading(false);
         }
     };
 
     const handleGoogleRegister = async () => {
         clearError();
-        setIsSubmitting(true);
+        setLoading(true);
         try {
             const result = await signInWithPopup(auth, googleProvider);
             if (result.user) {
-                await createInitialUserData(result.user.uid, result.user.displayName, result.user.email);
-                setError('Successfully registered and logged in with Google!', false);
+                await createInitialUserData(result.user.uid, result.user.displayName || '', result.user.email);
+                setError('Google registration successful!', false);
             }
-        } catch (error) {
-            console.error('Google Registration Error:', error);
-            setError('Google sign-up failed. Please try again.');
+        } catch (err: any) {
+            setError(err.message, true);
         } finally {
-            setIsSubmitting(false);
+            setLoading(false);
         }
     };
 
     return (
-        <div className="card shadow-xl p-4 p-md-5 transition-transform duration-300 hover:shadow-2xl hover:scale-[1.01]" style={{ maxWidth: '600px', width: '100%' }}>
-            <div className="card-body text-center">
-                <h2 className="card-title text-primary fw-bold mb-1">Create an Account (Job Seeker)</h2>
-                <p className="card-subtitle text-muted mb-4">Enter your details below to get started</p>
-
-                <form onSubmit={handleRegister}>
-                    <div className="row mb-3">
-                        <div className="col-md-6 text-start">
-                            <label htmlFor="firstName" className="form-label">First Name</label>
-                            <input type="text" className="form-control" id="firstName" value={firstName} onChange={(e) => setFirstName(e.target.value)} required />
-                        </div>
-                        <div className="col-md-6 text-start">
-                            <label htmlFor="lastName" className="form-label">Last Name</label>
-                            <input type="text" className="form-control" id="lastName" value={lastName} onChange={(e) => setLastName(e.target.value)} required />
-                        </div>
+        <AuthCardWrapper title="Create Account" subtitle="Start your journey today">
+            <form onSubmit={handleRegister} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="form-label text-gray-700 font-medium">First Name</label>
+                        <input 
+                            type="text" 
+                            className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                            placeholder="John" 
+                            value={firstName} 
+                            onChange={e => setFirstName(e.target.value)} 
+                            required 
+                        />
                     </div>
-
-                    <div className="mb-3 text-start">
-                        <label htmlFor="mobileNumber" className="form-label">Mobile Number</label>
-                        <input type="tel" className="form-control" id="mobileNumber" value={mobileNumber} onChange={(e) => setMobileNumber(e.target.value)} placeholder="e.g., 1234567890" />
+                    <div>
+                        <label className="form-label text-gray-700 font-medium">Last Name</label>
+                        <input 
+                            type="text" 
+                            className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                            placeholder="Doe" 
+                            value={lastName} 
+                            onChange={e => setLastName(e.target.value)} 
+                            required 
+                        />
                     </div>
-
-                    <div className="mb-3 text-start">
-                        <label htmlFor="registerEmail" className="form-label">Email</label>
-                        <input type="email" className="form-control" id="registerEmail" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com" required />
+                </div>
+                
+                <div>
+                    <label className="form-label text-gray-700 font-medium">Email</label>
+                    <input 
+                        type="email" 
+                        className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                        placeholder="name@example.com" 
+                        value={email} 
+                        onChange={e => setEmail(e.target.value)} 
+                        required 
+                    />
+                </div>
+                
+                <div>
+                    <label className="form-label text-gray-700 font-medium">Password</label>
+                    <input 
+                        type="password" 
+                        className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                        placeholder="At least 8 characters" 
+                        value={password} 
+                        onChange={e => setPassword(e.target.value)} 
+                        required 
+                    />
+                </div>
+                
+                <div>
+                    <label className="form-label text-gray-700 font-medium">Confirm Password</label>
+                    <input 
+                        type="password" 
+                        className="form-control rounded-xl border-gray-200 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 py-3" 
+                        placeholder="Confirm your password" 
+                        value={confirmPassword} 
+                        onChange={e => setConfirmPassword(e.target.value)} 
+                        required 
+                    />
+                </div>
+                
+                <PrimaryButton type="submit" disabled={loading} className="w-full py-3">
+                    {loading ? (
+                        <><i className="bi bi-arrow-clockwise animate-spin me-2"></i> Creating Account...</>
+                    ) : (
+                        'Create Account'
+                    )}
+                </PrimaryButton>
+            </form>
+            
+            <div className="text-center mt-6">
+                <div className="relative mb-4">
+                    <div className="absolute inset-0 flex items-center">
+                        <div className="w-full border-t border-gray-200"></div>
                     </div>
-
-                    <div className="mb-3 text-start">
-                        <label htmlFor="registerPassword" className="form-label">Password</label>
-                        <input type="password" className="form-control" id="registerPassword" value={password} onChange={(e) => setPassword(e.target.value)} required />
-                        <small className="form-text text-muted">Password must be at least 8 characters.</small>
+                    <div className="relative flex justify-center text-sm">
+                        <span className="px-2 bg-white text-gray-500">Or continue with</span>
                     </div>
-                    <div className="mb-4 text-start">
-                        <label htmlFor="confirmPassword" className="form-label">Confirm Password</label>
-                        <input
-                            type="password" className="form-control" id="confirmPassword" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} required />
-                    </div>
-                    <button type="submit" className="btn btn-primary w-100 mb-3 transition-all duration-200 hover:opacity-90" disabled={isSubmitting}>
-                        {isSubmitting ? 'Creating Account...' : 'Create Account'}
-                    </button>
-                </form>
-                <p className="text-muted small my-3">OR CONTINUE WITH</p>
-                <button
-                    className="btn btn-outline-secondary w-100 
-d-flex align-items-center justify-content-center mb-4 transition-all duration-200 hover:bg-gray-100"
-                    onClick={handleGoogleRegister}
-                    disabled={isSubmitting}
+                </div>
+                
+                <button 
+                    onClick={handleGoogleRegister} 
+                    disabled={loading}
+                    className="w-full flex items-center justify-center gap-3 py-3 px-4 border border-gray-200 rounded-xl text-gray-700 font-medium hover:bg-gray-50"
                 >
-                    <i className="bi bi-google me-2"></i> Google
+                    <i className="bi bi-google text-red-500"></i>
+                    Continue with Google
                 </button>
-                <p className="small text-muted mb-0">
-                    Already have an account?
-                    <a href="#" onClick={(e) => { e.preventDefault(); switchToLogin(); }} className="text-primary fw-bold text-decoration-none hover:text-indigo-600 transition-colors">Sign In</a>
+                
+                <p className="mt-6 text-gray-600">
+                    Already have an account?{' '}
+                    <button 
+                        onClick={switchToLogin} 
+                        className="text-indigo-600 font-semibold hover:text-indigo-700"
+                    >
+                        Sign in
+                    </button>
                 </p>
             </div>
-        </div>
+        </AuthCardWrapper>
     );
 };
 
-
 // ===============================================
-// 6. DASHBOARD (Job Seeker)
+// 5. DASHBOARD & FEATURES
 // ===============================================
 
-// DUMMY IMPLEMENTATIONS for external functions
-const API_KEY = 'DUMMY_API_KEY';
-// --- Type Definitions for Dashboard Data ---
-interface DashboardJobData {
-    jobsApplied: number;
-    savedJobs: number;
-    interviews: number;
-    newMatches: number;
-    displayName: string;
+// Mock Data Interfaces
+interface DashboardJobData { 
+    jobsApplied: number; 
+    savedJobs: number; 
+    interviews: number; 
+    newMatches: number; 
+    displayName: string; 
     email: string;
     userId: string;
-    phone: string;
+}
+
+interface Hackathon { 
+    id: string; 
+    title: string; 
+    description: string; 
+    companyName: string; 
+    prizePool: string; 
+    isVirtual: boolean; 
+    skills: string[]; 
+    startDate: string;
+    endDate: string;
     location: string;
 }
 
-const getInitialUserData = async (uid: string): Promise<DashboardJobData | null> => {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    const appId = process.env.NEXT_PUBLIC_FIREBASE_APP_ID || 'default-app-id';
-    const profileRef = doc(db, 'artifacts', appId, 'users', uid, 'data', 'profile');
-    try {
-        const docSnap = await getDoc(profileRef as any);
-        if (docSnap.exists()) {
-             const data = docSnap.data() as DashboardJobData & { jobData: Omit<DashboardJobData, 'displayName' | 'email' | 'userId' | 'phone' | 'location'> };
-             return { ...data, ...data.jobData } as DashboardJobData;
-        } else {
-             const defaultData: DashboardJobData = {
-                 jobsApplied: 12, savedJobs: 5, interviews: 2, newMatches: 8,
-                 displayName: auth.currentUser?.displayName || 'Job Seeker',
-                 email: auth.currentUser?.email || 'N/A',
-                 userId: uid, phone: '123-456-7890', location: 'San Francisco, CA',
-             };
-             await createInitialUserData(uid, defaultData.displayName, defaultData.email);
-             return defaultData;
-        }
-    } catch (e) {
-         console.error("Error fetching or creating profile data:", e);
-         return {
-             jobsApplied: 0, savedJobs: 0, interviews: 0, newMatches: 0,
-             displayName: 'Error User', email: 'error@example.com', userId: uid,
-             phone: 'N/A', location: 'N/A',
-           }
-    }
-};
-
-const fetchWithRetry = async (url: string, options: any) => {
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    return {
-        json: async () => ({
-            candidates: [{ content: { parts: [{ text: "Based on your current activity, focus on refining your interview technique. With 2 interviews out of 12 applications, your resume is working, but the conversion rate is low. Consider running mock interviews for the specific roles you're applying for." }] } }]
-        })
-    };
-};
-
-
-// --- Component: StatCard (Embedded) ---
-interface StatCardProps {
-    title: string;
-    value: number;
-    subtitle: string;
-    icon: React.ReactNode; 
-    colorClass: string;
-}
-
-const StatCard: FC<StatCardProps> = ({ title, value, subtitle, icon, colorClass }) => (
-    <div className={`col-md-3 mb-4`}>
-        <div className="card shadow-md border-0 h-100 transition-all duration-300 hover:shadow-lg hover:scale-[1.02] cursor-pointer">
-            <div className="card-body">
-                <div className="d-flex justify-content-between align-items-start">
-                    <div>
-                        <p className="card-text text-muted mb-1 small">{title}</p>
-                        <h4 className="card-title fw-bold mb-0 text-dark">{value}</h4>
-                    </div>
-                    <div className={`p-2 rounded ${colorClass}`}>
-                        {icon}
-                    </div>
-                </div>
-                <small className="text-muted mt-2 d-block">{subtitle}</small>
+// Stat Card Component
+const StatCard: FC<{ title: string; value: number; icon: string; color: string; subtitle: string }> = ({ title, value, icon, color, subtitle }) => (
+    <GlassCard className="p-6 h-full">
+        <div className="flex justify-between items-start">
+            <div>
+                <p className="text-gray-500 text-sm font-medium mb-1">{title}</p>
+                <h3 className="text-3xl font-bold text-gray-800 mb-2">{value}</h3>
+                <p className="text-gray-400 text-sm">{subtitle}</p>
+            </div>
+            <div className={`p-3 rounded-2xl bg-${color}-100 text-${color}-600`}>
+                <i className={`bi ${icon} text-xl`}></i>
             </div>
         </div>
-    </div>
+    </GlassCard>
 );
 
-// --- Component: Sidebar (Embedded) ---
-interface SidebarProps {
-    currentMenu: string;
-    setCurrentMenu: (menu: string) => void;
-    userEmail: string | null;
-    handleLogout: () => void;
-}
-
-const Sidebar: FC<SidebarProps> = ({ currentMenu, setCurrentMenu, userEmail, handleLogout }) => {
-
-    const getInitials = (email: string | null): string => {
-        if (!email) return '?';
-        return email.length > 0 ? email[0].toUpperCase() : '?'; 
-    };
-
-    const menuItems = [
-        { key: 'dashboard', label: 'Dashboard', icon: <i className="bi bi-grid-fill me-2"></i> },
-        { key: 'jobSearch', label: 'Job Search', icon: <i className="bi bi-search me-2"></i> },
-        { key: 'mapView', label: 'Map View', icon: <i className="bi bi-geo-alt-fill me-2"></i> },
-        { key: 'savedJobs', label: 'Saved Jobs', icon: <i className="bi bi-bookmark-fill me-2"></i> },
-        { key: 'applications', label: 'Applications', icon: <i className="bi bi-file-earmark-text-fill me-2"></i> },
-        { key: 'profile', label: 'Profile', icon: <i className="bi bi-person-circle me-2"></i> },
-        { key: 'resume', label: 'Resume', icon: <i className="bi bi-file-earmark-person me-2"></i> }, 
-    ];
-    return (
-        <div className="d-flex flex-column flex-shrink-0 p-3 text-dark bg-white shadow-md" style={{ width: '250px', borderRight: '1px solid #dee2e6' }}>
-            <a href="#" className="d-flex align-items-center mb-3 mb-md-0 me-md-auto text-decoration-none text-dark">
-                <i className="bi bi-briefcase-fill me-2 fs-4 text-primary"></i>
-                <span className="fs-5 fw-bold text-dark">JobMap</span>
-            </a>
-
-            <hr className="d-none d-md-block" />
-            <ul className="nav nav-pills flex-column mb-auto">
-                {menuItems.map(item => (
-                    <li key={item.key} className="nav-item">
-                        <a
-                            href="#"
-                            onClick={(e) => { e.preventDefault(); setCurrentMenu(item.key); }}
-                            className={`nav-link text-dark transition-all duration-150 hover:bg-gray-100 ${currentMenu === item.key ? 'active bg-primary text-white shadow-sm' : ''}`}
-                            aria-current={currentMenu === item.key ? 'page' : undefined}
-                        >
-                            {item.icon}
-                            {item.label}
-                        </a>
-                    </li>
+// Hackathon Card Component
+const HackathonCard: FC<{ hackathon: Hackathon }> = ({ hackathon }) => (
+    <GlassCard className="h-full flex flex-col">
+        <div className="p-6 flex-grow">
+            <div className="flex justify-between items-start mb-4">
+                <span className={`px-3 py-1 rounded-full text-xs font-medium ${hackathon.isVirtual ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
+                    {hackathon.isVirtual ? '🌐 Virtual' : '🏢 On-Site'}
+                </span>
+                <span className="text-amber-600 font-bold text-sm">
+                    <i className="bi bi-trophy-fill mr-1"></i> {hackathon.prizePool}
+                </span>
+            </div>
+            <h5 className="font-bold text-lg text-gray-800 mb-2">{hackathon.title}</h5>
+            <p className="text-indigo-600 text-sm font-medium mb-3">{hackathon.companyName}</p>
+            <p className="text-gray-600 text-sm mb-4 line-clamp-2">{hackathon.description}</p>
+            <div className="flex gap-2 flex-wrap">
+                {hackathon.skills.slice(0, 3).map((skill, index) => (
+                    <span key={index} className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
+                        {skill}
+                    </span>
                 ))}
-            </ul>
-            <hr />
-            <div className="dropdown">
-                <a href="#" className="d-flex align-items-center 
-text-dark text-decoration-none dropdown-toggle" id="dropdownUser1" data-bs-toggle="dropdown" aria-expanded="false">
-                    <div className="bg-primary text-white rounded-circle d-flex align-items-center justify-content-center me-2" style={{ width: '32px', height: '32px' }}>
-                        {getInitials(userEmail)}
-                    </div>
-
-                    <strong className="text-truncate">{userEmail || 'Guest'}</strong>
-                </a>
-                <ul className="dropdown-menu dropdown-menu-dark text-small shadow" aria-labelledby="dropdownUser1">
-                    <li><a className="dropdown-item" href="Profile.tsx" onClick={(e) => { e.preventDefault();
-setCurrentMenu('profile'); }}>Profile</a></li>
-                    <li><a className="dropdown-item" href="#" onClick={(e) => { e.preventDefault();
-setCurrentMenu('settings'); }}>Settings</a></li>
-                    <li><hr className="dropdown-divider" /></li>
-                    <li><a className="dropdown-item" href="#" onClick={(e) => { e.preventDefault();
-handleLogout(); }}>Sign out</a></li>
-                </ul>
+                {hackathon.skills.length > 3 && (
+                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
+                        +{hackathon.skills.length - 3} more
+                    </span>
+                )}
             </div>
         </div>
-    );
-};
+        <div className="p-4 border-t border-gray-100">
+            <button className="w-full bg-gray-50 hover:bg-gray-100 text-gray-700 font-medium py-2 px-4 rounded-xl">
+                View Details
+            </button>
+        </div>
+    </GlassCard>
+);
 
-export const Dashboard: FC = () => {
-    const { auth, user, db, clearError, setError } = useAuth();
-    const [currentMenu, setCurrentMenu] = useState('dashboard');
-    const [jobData, setJobData] = useState<DashboardJobData | null>(null);
+// Dashboard Content Component
+const JobSeekerDashboardContent: FC<{ setCurrentMenu: (m: string) => void }> = ({ setCurrentMenu }) => {
+    const { user } = useAuth();
+    const [geminiPrompt, setGeminiPrompt] = useState('');
     const [geminiLoading, setGeminiLoading] = useState(false);
-    const [geminiRecommendation, setGeminiRecommendation] = useState('');
-    const [prompt, setPrompt] = useState('');
-    const [editableProfile, setEditableProfile] = useState<{ displayName: string, phone: string, location: string }>({
-        displayName: '', phone: '', location: ''
-    });
-
-    const handleLogout = async () => {
-        if (!auth) return;
-        try {
-            await signOut(auth);
-            localStorage.removeItem('activePortal'); // ✅ LOCAL STORAGE CLEAR
-            clearError();
-            setError('You have successfully signed out.', false);
-        } catch (err) {
-            console.error("Logout failed:", err);
-            setError("Failed to sign out. Please try again.");
-        }
+    
+    // Mock data
+    const jobData: DashboardJobData = {
+        jobsApplied: 14, 
+        savedJobs: 8, 
+        interviews: 3, 
+        newMatches: 12,
+        displayName: user?.displayName || 'Job Seeker',
+        email: user?.email || '',
+        userId: user?.uid || ''
     };
-
-    const loadUserData = useCallback(async () => {
-        if (user) {
-            const data = await getInitialUserData(user.uid);
-            if (data) {
-                setJobData(data);
-                setEditableProfile({
-                    displayName: data.displayName,
-                    phone: data.phone,
-                    location: data.location,
-                });
-            }
-        }
-    }, [user, setError]);
-
-    useEffect(() => {
-        if(user && !user.isAnonymous) loadUserData();
-    }, [user, loadUserData]);
+    
+    const hackathons: Hackathon[] = [
+        { 
+            id: '1', 
+            title: 'Global AI Challenge', 
+            description: 'Build innovative AI solutions for real-world problems. Open to all skill levels.', 
+            companyName: 'Google AI', 
+            prizePool: '$50,000', 
+            isVirtual: true, 
+            skills: ['Python', 'TensorFlow', 'Machine Learning'],
+            startDate: '2024-03-15',
+            endDate: '2024-03-17',
+            location: 'Virtual'
+        },
+        { 
+            id: '2', 
+            title: 'FinTech Innovation Hackathon', 
+            description: 'Create the next generation of financial technology solutions.', 
+            companyName: 'Stripe', 
+            prizePool: '$25,000', 
+            isVirtual: false, 
+            skills: ['React', 'Node.js', 'Blockchain'],
+            startDate: '2024-04-10',
+            endDate: '2024-04-12',
+            location: 'San Francisco, CA'
+        },
+    ];
 
     const handleGeminiQuery = async () => {
-        if (!prompt.trim() || !jobData) return;
-
+        if (!geminiPrompt.trim()) return;
+        
         setGeminiLoading(true);
-        setGeminiRecommendation('');
-
-        const GEMINI_MODEL = "gemini-2.5-flash-preview-05-20";
-        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${API_KEY}`;
-
-        const systemPrompt = "You are a friendly, professional career and job search assistant. Provide concise, actionable advice or information based on the user's query and their job application statistics. Do not use markdown headers (#).";
-        const userQuery = `My current job application stats are: Jobs Applied: ${jobData.jobsApplied}, Saved Jobs: ${jobData.savedJobs}, Interviews: ${jobData.interviews}, New Matches: ${jobData.newMatches}.
-My specific query is: "${prompt}".`;
-
-        const payload = {
-            contents: [{ parts: [{ text: userQuery }] }],
-            tools: [{ "google_search": {} }],
-            systemInstruction: {
-                parts: [{ text: systemPrompt }]
-            },
-        };
-        try {
-            const response = await fetchWithRetry(API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const result = await response.json();
-            const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't get a recommendation right now.";
-            setGeminiRecommendation(text);
-        } catch (error) {
-            console.error('Gemini API call failed:', error);
-            setGeminiRecommendation("Failed to connect to the assistant. Please check your network or try again.");
-        } finally {
+        // Simulate API call
+        setTimeout(() => {
             setGeminiLoading(false);
-        }
+            setGeminiPrompt('');
+        }, 2000);
     };
 
-
-    const renderDashboardContent = () => (
-        <div className="row">
-            {jobData && (
-                <>
-                    <StatCard
-                        title="Jobs Applied"
-                        value={jobData.jobsApplied}
-                        subtitle={`${jobData.jobsApplied} submitted this week`}
-                        icon={<i className="bi bi-file-earmark-check-fill fs-4 text-primary"></i>}
-                        colorClass="bg-primary bg-opacity-10 text-primary"
-                    />
-                    <StatCard
-                        title="Saved Jobs"
-                        value={jobData.savedJobs}
-                        subtitle={`${jobData.savedJobs} new this week`}
-                        icon={<i className="bi bi-bookmark-heart-fill fs-4 text-warning"></i>}
-                        colorClass="bg-warning bg-opacity-10 text-warning"
-                    />
-                    <StatCard
-                        title="Interviews"
-                        value={jobData.interviews}
-                        subtitle={`${jobData.interviews} upcoming this week`}
-                        icon={<i className="bi bi-calendar-event-fill fs-4 text-success"></i>}
-                        colorClass="bg-success bg-opacity-10 text-success"
-                    />
-                    <StatCard
-                        title="New Matches"
-                        value={jobData.newMatches}
-                        subtitle={`${jobData.newMatches} based on your profile`}
-                        icon={<i className="bi bi-lightning-fill fs-4 text-info"></i>}
-                        colorClass="bg-info bg-opacity-10 text-info"
-                    />
-                </>
-            )}
-
-            {/* Application Progress Chart (Mock Data Visualization) */}
-            <div 
-                className="col-md-6 mb-4">
-                <div className="card shadow-lg h-100">
-                    <div className="card-header bg-white border-0 py-3">
-                        <h5 className="mb-0 text-dark">Application Funnel Progress</h5>
-                        <p className="card-subtitle text-muted small">Visualizing movement through your hiring pipeline.</p>
-                    </div>
-                    <div className="card-body">
-                        <div className="mb-4">
-                            <h6 className="small text-muted mb-1">Applied (12)</h6>
-                            <div className="progress" style={{ height: '10px' }}>
-                                <div 
-                                    className="progress-bar bg-primary" role="progressbar" style={{ width: '100%' }} aria-valuenow={100} aria-valuemin={0} aria-valuemax={100}></div>
-                            </div>
-                        </div>
-                        <div className="mb-4">
-                            <h6 className="small text-muted mb-1">Screening (5)</h6>
-                            <div className="progress" style={{ height: '10px' }}>
-                                <div className="progress-bar bg-warning" role="progressbar" style={{ width: '40%' }} aria-valuenow={40} aria-valuemin={0} aria-valuemax={100}></div>
-                            </div>
-                        </div>
-                        <div className="mb-4">
-                            <h6 className="small text-muted mb-1">Interview (2)</h6>
-                            <div className="progress" style={{ height: '10px' }}>
-                                <div className="progress-bar bg-success" role="progressbar" style={{ width: '16%' }} aria-valuenow={16} aria-valuemin={0} aria-valuemax={100}></div>
-                            </div>
-                        </div>
-                        <div className="mb-4">
-                            <h6 className="small text-muted mb-1">Offer (0)</h6>
-                            <div className="progress" style={{ height: '10px' }}>
-                                <div className="progress-bar bg-danger" role="progressbar" style={{ width: '0%' }} aria-valuenow={0} aria-valuemin={0} aria-valuemax={100}></div>
-                            </div>
-                        </div>
+    return (
+        <div className="space-y-8">
+            {/* Welcome Header */}
+            <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-3xl p-8 text-white relative overflow-hidden">
+                <div className="relative z-10">
+                    <h1 className="text-3xl font-bold mb-2">Welcome back, {jobData.displayName}! 👋</h1>
+                    <p className="text-indigo-100 text-lg max-w-2xl">
+                        You have <span className="font-semibold text-amber-300">{jobData.interviews} interviews</span> coming up this week. 
+                        Ready to ace them?
+                    </p>
+                    <div className="flex gap-4 mt-6">
+                        <button 
+                            onClick={() => setCurrentMenu('jobSearch')} 
+                            className="bg-white text-indigo-600 px-6 py-3 rounded-xl font-semibold shadow-lg"
+                        >
+                            <i className="bi bi-search me-2"></i>Find Jobs
+                        </button>
+                        <button 
+                            onClick={() => setCurrentMenu('resume')} 
+                            className="bg-indigo-400 text-white border border-indigo-300 px-6 py-3 rounded-xl font-semibold hover:bg-indigo-300"
+                        >
+                            <i className="bi bi-file-earmark-person me-2"></i>Edit Resume
+                        </button>
                     </div>
                 </div>
             </div>
 
-            {/* Job Search Map Placeholder */}
-            <div className="col-md-6 mb-4">
-                <div className="card shadow-lg h-100">
-                    <div className="card-header bg-white border-0 py-3">
-                        <h5 className="mb-0 text-dark">Local Job Market Overview</h5>
-                        <p className="card-subtitle text-muted small">Concentration of relevant jobs in your area.</p>
-                    </div>
-                    <div className="card-body p-4" style={{ minHeight: '300px' }}>
-                        <div className="bg-gray-100 rounded p-4 h-100 d-flex flex-column align-items-center justify-content-center border border-dashed border-gray-300">
-                            <i className="bi bi-pin-map-fill fs-1 text-secondary opacity-75 mb-3"></i>
-                            <p className="fw-bold mb-1">Interactive Map Rendering Disabled</p>
-                            <p className="small text-muted text-center">Pinpointing 48 new job locations near Mock City, CA.</p>
-                        </div>
-                    </div>
+            {/* Stats Grid */}
+            <div>
+                <SectionHeader title="Your Job Search at a Glance" />
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <StatCard 
+                        title="Jobs Applied" 
+                        value={jobData.jobsApplied} 
+                        icon="bi-send-check-fill" 
+                        color="blue"
+                        subtitle="This month"
+                    />
+                    <StatCard 
+                        title="Saved Jobs" 
+                        value={jobData.savedJobs} 
+                        icon="bi-bookmark-heart-fill" 
+                        color="rose"
+                        subtitle="Ready to apply"
+                    />
+                    <StatCard 
+                        title="Interviews" 
+                        value={jobData.interviews} 
+                        icon="bi-calendar-check-fill" 
+                        color="green"
+                        subtitle="Scheduled"
+                    />
+                    <StatCard 
+                        title="New Matches" 
+                        value={jobData.newMatches} 
+                        icon="bi-lightning-fill" 
+                        color="amber"
+                        subtitle="This week"
+                    />
                 </div>
             </div>
 
-            <div className="col-md-4">
-                {/* Recommended Jobs */}
-                <div className="card shadow-lg h-100">
-                    <div className="card-header bg-white border-0 py-3">
-                        <h5 className="mb-0 text-dark">Top Job Matches</h5>
-                        <p className="card-subtitle text-muted small">Based on your profile and activity.</p>
-                    </div>
-                    <ul className="list-group list-group-flush">
-                        {[
-                            { title: 'Senior Frontend Developer', company: 'Acme Inc.', location: 'San Francisco, CA', remote: true, salary: '140k' },
-                            { title: 'UX/UI Designer', company: 'Stark Industries', location: 'New York, NY', remote: false, salary: '110k' },
-                            { title: 'Product Manager', company: 'Wayne Enterprises', location: 'Remote', remote: true, salary: '160k' },
-                            { title: 'Data Scientist', company: 'Cyberdyne Systems', location: 'Austin, TX', remote: false, salary: '135k' },
-                        ].map((job, index) => (
-                            <li key={index} className="list-group-item d-flex align-items-center justify-content-between 
-transition-colors duration-150 hover:bg-gray-50 cursor-pointer p-3">
-                                <div className="d-flex align-items-start">
-                                    <div className="bg-gray-200 text-dark rounded-full d-flex align-items-center justify-content-center me-3 fs-6 fw-bold" style={{ width: '40px', height: '40px' }}>
-                                        {job.company[0]}
-                                    </div>
-                                    <div>
-                                        <h6 className="mb-0 fw-bold text-dark">{job.title}</h6>
-                                        <p className="small text-muted mb-1">{job.company} &middot;
-{job.location}</p>
-                                        <div className="d-flex flex-wrap gap-1">
-                                            <span className={`badge text-white ${job.remote ? 'bg-success' : 'bg-secondary'}`}>{job.remote ? 'Remote' : 'On-Site'}</span>
-                                            <span className="badge bg-info text-white">${job.salary}</span>
-                                        </div>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* AI Assistant - Left Column */}
+                <div className="lg:col-span-2">
+                    <GlassCard>
+                        <div className="p-6 border-b border-gray-100">
+                            <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center text-white text-xl shadow-lg">
+                                    <i className="bi bi-robot"></i>
+                                </div>
+                                <div>
+                                    <h3 className="text-xl font-bold text-gray-800">AI Career Assistant</h3>
+                                    <p className="text-gray-600">Get personalized advice for your job search</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="p-6">
+                            <div className="space-y-4 mb-6">
+                                <div className="flex justify-start">
+                                    <div className="bg-gray-100 rounded-2xl rounded-tl-none px-4 py-3 max-w-[80%]">
+                                        <p className="text-gray-700">
+                                            Hello! Based on your activity, I recommend focusing on technical interview preparation. 
+                                            Would you like me to generate some practice questions?
+                                        </p>
                                     </div>
                                 </div>
-                                <button className="btn btn-sm btn-outline-primary" onClick={(e) => { 
-e.stopPropagation(); alert(`Applying for ${job.title}`); }}>Apply</button>
-                            </li>
-                        ))}
-                    </ul>
-                </div>
-            </div>
-
-            {/* AI Assistant (Gemini) Panel */}
-            <div className="col-md-8">
-                <div className="card shadow-lg h-100">
-                    <div className="card-header bg-white border-0 py-3">
-                        <h5 className="mb-0 text-dark">AI Career Assistant (Gemini)</h5>
-                        <p className="card-subtitle text-muted small">Get personalized advice based on your current job metrics.</p>
-                    </div>
-                    <div className="card-body d-flex flex-column">
-                        <div className="alert alert-secondary mb-3">
-                            <p className="fw-bold mb-1 d-flex align-items-center"><i className="bi bi-robot me-2"></i> Gemini's Advice:</p>
-                            {geminiLoading ?
-                                (
-                                <p className="text-center text-muted"><i className="bi bi-arrow-clockwise animate-spin me-2"></i> Generating recommendation...</p>
-                                ) : (
-                                <p className="mb-0 small">{geminiRecommendation || "Ask a question about your job search strategy, e.g., 'What roles should I prioritize based on my experience?'"}</p>
-                                )}
-                        </div>
-                        <div 
-                            className="mt-auto">
-                            <div className="input-group">
+                            </div>
+                            <div className="flex gap-3">
                                 <input
                                     type="text"
-                                    className="form-control"
-                                    placeholder="Ask your career question..."
-                                    value={prompt}
-                                    onChange={(e) => setPrompt(e.target.value)}
-                                    onKeyDown={(e) => { if (e.key === 'Enter') handleGeminiQuery();
-                                    }}
-                                    disabled={geminiLoading}
+                                    className="flex-1 border border-gray-200 rounded-xl px-4 py-3 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
+                                    placeholder="Ask me anything about your job search..."
+                                    value={geminiPrompt}
+                                    onChange={(e) => setGeminiPrompt(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handleGeminiQuery()}
                                 />
-                                <button className="btn btn-primary" type="button" onClick={handleGeminiQuery} disabled={geminiLoading}>
-                                    Ask <i className="bi bi-send-fill ms-1"></i>
+                                <button 
+                                    onClick={handleGeminiQuery}
+                                    disabled={geminiLoading}
+                                    className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {geminiLoading ? (
+                                        <i className="bi bi-arrow-clockwise animate-spin"></i>
+                                    ) : (
+                                        <i className="bi bi-send-fill"></i>
+                                    )}
                                 </button>
                             </div>
                         </div>
+                    </GlassCard>
+                </div>
+
+                {/* Hackathons - Right Column */}
+                <div>
+                    <div className="flex justify-between items-center mb-6">
+                        <h3 className="text-xl font-bold text-gray-800">Featured Hackathons</h3>
+                        <button 
+                            onClick={() => setCurrentMenu('hackathons')}
+                            className="text-indigo-600 hover:text-indigo-700 font-medium text-sm"
+                        >
+                            View All
+                        </button>
+                    </div>
+                    <div className="space-y-4">
+                        {hackathons.map((hackathon) => (
+                            <div key={hackathon.id} className="bg-white rounded-2xl p-4 border border-gray-200 hover:border-indigo-300 cursor-pointer">
+                                <div className="flex items-start gap-3">
+                                    <div className="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
+                                        {hackathon.companyName.substring(0, 2)}
+                                    </div>
+                                    <div className="flex-1">
+                                        <h4 className="font-semibold text-gray-800 mb-1">{hackathon.title}</h4>
+                                        <p className="text-gray-600 text-sm mb-2">{hackathon.companyName}</p>
+                                        <div className="flex items-center gap-4 text-xs text-gray-500">
+                                            <span className="flex items-center gap-1">
+                                                <i className="bi bi-trophy-fill text-amber-500"></i>
+                                                {hackathon.prizePool}
+                                            </span>
+                                            <span className="flex items-center gap-1">
+                                                <i className="bi bi-geo-alt-fill text-blue-500"></i>
+                                                {hackathon.isVirtual ? 'Virtual' : hackathon.location}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 </div>
             </div>
         </div>
     );
+};
 
+// ===============================================
+// 6. FLOATING SIDEBAR & LAYOUT
+// ===============================================
+
+const Sidebar: FC<{ 
+    currentMenu: string; 
+    setCurrentMenu: (m: string) => void; 
+    handleLogout: () => void;
+    mobileOpen: boolean;
+    setMobileOpen: (open: boolean) => void;
+}> = ({ currentMenu, setCurrentMenu, handleLogout, mobileOpen, setMobileOpen }) => {
+    const { user } = useAuth();
+    
+    const menuItems = [
+        { key: 'dashboard', label: 'Dashboard', icon: 'bi-grid-3x3-gap-fill' },
+        { key: 'jobSearch', label: 'Job Search', icon: 'bi-search' },
+        { key: 'mapView', label: 'Map View', icon: 'bi-geo-alt-fill' },
+        { key: 'savedJobs', label: 'Saved Jobs', icon: 'bi-bookmark-fill' },
+        { key: 'applications', label: 'Applications', icon: 'bi-file-earmark-text-fill' },
+        { key: 'hackathons', label: 'Hackathons', icon: 'bi-trophy-fill' },
+        { key: 'resume', label: 'Resume Builder', icon: 'bi-file-earmark-person-fill' },
+        { key: 'profile', label: 'Profile', icon: 'bi-person-circle' },
+    ];
+
+    const sidebarContent = (
+        <div className="bg-white h-full flex flex-col border-r border-gray-200 lg:border-r-0">
+            {/* Logo */}
+            <div className="flex items-center gap-3 p-6 border-b border-gray-200">
+                <div className="w-10 h-10 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-xl flex items-center justify-center shadow-lg">
+                    <i className="bi bi-briefcase-fill text-white text-lg"></i>
+                </div>
+                <span className="text-xl font-bold text-gray-800">JobMap</span>
+                {/* Mobile close button */}
+                <button 
+                    onClick={() => setMobileOpen(false)}
+                    className="lg:hidden ml-auto text-gray-500 hover:text-gray-700"
+                >
+                    <i className="bi bi-x-lg text-xl"></i>
+                </button>
+            </div>
+
+            {/* Navigation */}
+            <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+                {menuItems.map((item) => (
+                    <button
+                        key={item.key}
+                        onClick={() => {
+                            setCurrentMenu(item.key);
+                            setMobileOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left ${
+                            currentMenu === item.key
+                                ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg'
+                                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-800'
+                        }`}
+                    >
+                        <i className={`bi ${item.icon} text-lg`}></i>
+                        <span className="font-medium">{item.label}</span>
+                    </button>
+                ))}
+            </nav>
+
+            {/* User Section */}
+            <div className="p-4 border-t border-gray-200">
+                <div className="flex items-center gap-3 mb-4">
+                    <div className="w-10 h-10 bg-gradient-to-r from-gray-600 to-gray-800 rounded-xl flex items-center justify-center text-white font-medium">
+                        {user?.email?.charAt(0).toUpperCase() || 'U'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">
+                            {user?.displayName || 'User'}
+                        </p>
+                        <p className="text-xs text-gray-500 truncate">
+                            {user?.email}
+                        </p>
+                    </div>
+                </div>
+                <button
+                    onClick={handleLogout}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-red-50 hover:text-red-600"
+                >
+                    <i className="bi bi-box-arrow-right text-lg"></i>
+                    <span className="font-medium">Sign Out</span>
+                </button>
+            </div>
+        </div>
+    );
+
+    return (
+        <>
+            {/* Mobile Overlay */}
+            {mobileOpen && (
+                <div 
+                    className="lg:hidden fixed inset-0 bg-black bg-opacity-50 z-40"
+                    onClick={() => setMobileOpen(false)}
+                />
+            )}
+            
+            {/* Sidebar */}
+            <div className={`
+                fixed lg:static inset-y-0 left-0 z-50 w-80 transform
+                ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}
+                lg:translate-x-0 transition-transform duration-300 ease-in-out
+            `}>
+                {sidebarContent}
+            </div>
+        </>
+    );
+};
+
+// Dashboard Shell Component
+const DashboardShell: FC = () => {
+    const { auth, setError, clearError } = useAuth();
+    const [currentMenu, setCurrentMenu] = useState('dashboard');
+    const [mobileOpen, setMobileOpen] = useState(false);
+
+    const handleLogout = async () => {
+        try {
+            await signOut(auth);
+            localStorage.removeItem('activePortal');
+            setError('Signed out successfully', false);
+        } catch (err: any) {
+            setError('Logout failed', true);
+        }
+    };
 
     const renderContent = () => {
-        switch (currentMenu) {
-        case 'profile':
-            return <Profile />;
-        case 'jobSearch': // New Job Search List View
-            return <JobSearch />;
-        case 'mapView': // <- ADD THIS NEW CASE
-            return <MapView />;
-        case 'savedJobs':
-            return <SavedJobs />;
-        case 'applications':
-            return <Applications />;
-        case 'resume':
-            return <ResumeBuilder />;
-        default:
+        switch(currentMenu) {
+            case 'dashboard': 
+                return <JobSeekerDashboardContent setCurrentMenu={setCurrentMenu} />;
+            case 'profile': 
+                return <Profile />;
+            case 'jobSearch': 
+                return <JobSearch />;
+            case 'mapView': 
+                return <MapView />;
+            case 'savedJobs': 
+                return <SavedJobs />;
+            case 'applications': 
+                return <Applications />;
+            case 'hackathons': 
                 return (
-                    <div className="p-5 text-center bg-light rounded-3">
-                        <i className="bi bi-tools fs-1 text-secondary mb-3"></i>
-                        <h1 className="text-dark">Content for {currentMenu}</h1>
-                        <p className="lead text-muted">This area is under construction.</p>
+                    <div className="text-center py-12">
+                        <i className="bi bi-trophy text-4xl text-amber-500 mb-4"></i>
+                        <h2 className="text-2xl font-bold text-gray-800 mb-2">Hackathons</h2>
+                        <p className="text-gray-600">All hackathons will be displayed here.</p>
+                    </div>
+                );
+            case 'resume': 
+                return <ResumeBuilder />;
+            default:
+                return (
+                    <div className="text-center py-12">
+                        <i className="bi bi-cone-striped text-4xl text-gray-300 mb-4"></i>
+                        <h2 className="text-2xl font-bold text-gray-600 mb-2">Under Construction</h2>
+                        <p className="text-gray-400">This section is coming soon.</p>
                     </div>
                 );
         }
     };
 
-    if (!user || user.isAnonymous) {
-        return <AuthComponent />;
-    }
-
     return (
-        <div className="d-flex" style={{ minHeight: '100vh', backgroundColor: '#f8f9fa' }}>
+        <div className="min-h-screen bg-gray-50 flex">
             <Sidebar 
                 currentMenu={currentMenu} 
                 setCurrentMenu={setCurrentMenu} 
-                userEmail={user.email} 
                 handleLogout={handleLogout}
+                mobileOpen={mobileOpen}
+                setMobileOpen={setMobileOpen}
             />
-            <main className="flex-grow-1 p-4 p-md-5">
-                <h1 className="mb-4 text-dark fw-light text-capitalize">{currentMenu} Overview</h1>
-                {renderContent()}
+            
+            {/* Main Content */}
+            <main className="flex-1 min-h-screen overflow-auto">
+                {/* Mobile Header */}
+                <div className="lg:hidden bg-white border-b border-gray-200 p-4 sticky top-0 z-30">
+                    <div className="flex items-center justify-between">
+                        <button 
+                            onClick={() => setMobileOpen(true)}
+                            className="text-gray-600 hover:text-gray-800"
+                        >
+                            <i className="bi bi-list text-2xl"></i>
+                        </button>
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-lg flex items-center justify-center text-white">
+                                <i className="bi bi-briefcase-fill text-sm"></i>
+                            </div>
+                            <span className="font-bold text-gray-800">JobMap</span>
+                        </div>
+                        <div className="w-8"></div> {/* Spacer for balance */}
+                    </div>
+                </div>
+
+                <div className="p-4 lg:p-8">
+                    <div className="max-w-7xl mx-auto">
+                        {renderContent()}
+                    </div>
+                </div>
             </main>
         </div>
     );
 };
 
-
 // ===============================================
-// 7. AUTH COMPONENT (The wrapper for Login/Register) - REVISED LOGIC
+// 7. LANDING PAGE (Updated with View More Button)
 // ===============================================
 
-// New type definition for the current portal
-type PortalView = 'seeker' | 'company';
+const LandingPage: FC<{ setPortal: (portal: 'seeker' | 'company') => void }> = ({ setPortal }) => {
+    const [showExplorePage, setShowExplorePage] = useState(false);
 
-// Local Storage functions
-const saveActivePortal = (portal: PortalView) => {
-    if (typeof window !== 'undefined') {
-        localStorage.setItem('activePortal', portal);
+    // If showExplorePage is true, render the ExploreOpportunities component
+    if (showExplorePage) {
+        return <ExploreOpportunities onBack={() => setShowExplorePage(false)} />;
     }
-};
 
-const loadActivePortal = (): PortalView | null => {
-    if (typeof window !== 'undefined') {
-        return localStorage.getItem('activePortal') as PortalView | null;
-    }
-    return null;
-};
+    return (
+        <div className="min-h-screen bg-white">
+            {/* Navigation */}
+            <nav className="fixed w-full z-50 bg-white/95 border-b border-gray-100">
+                <div className="container mx-auto px-6 h-20 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-lg flex items-center justify-center text-white">
+                            <i className="bi bi-briefcase-fill text-sm"></i>
+                        </div>
+                        <span className="text-xl font-bold text-gray-800">JobMap</span>
+                    </div>
+                    <button 
+                        onClick={() => document.getElementById('portal-selection')?.scrollIntoView({ behavior: 'smooth' })}
+                        className="bg-gray-900 text-white px-6 py-2.5 rounded-xl font-medium hover:bg-gray-800"
+                    >
+                        Get Started
+                    </button>
+                </div>
+            </nav>
 
+            {/* Hero Section */}
+            <section className="pt-32 pb-20 px-6 container mx-auto">
+                <div className="text-center max-w-4xl mx-auto">
+                    <div className="inline-flex items-center gap-2 bg-indigo-50 text-indigo-600 px-4 py-1.5 rounded-full text-sm font-medium mb-8 border border-indigo-100">
+                        <i className="bi bi-stars"></i>
+                        The future of job searching is here
+                    </div>
+                    
+                    <h1 className="text-5xl lg:text-6xl font-bold text-gray-900 mb-6 leading-tight">
+                        Find Your Dream Job with{' '}
+                        <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 to-purple-600">
+                            Intelligent Maps
+                        </span>
+                    </h1>
+                    
+                    <p className="text-xl text-gray-600 mb-12 max-w-2xl mx-auto leading-relaxed">
+                        Stop scrolling through endless lists. Visualize opportunities, optimize your resume with AI, 
+                        and get hired faster with our intelligent job mapping platform.
+                    </p>
 
-// New component for selecting the portal
-const PortalSelection: FC<{ setPortal: (view: PortalView) => void }> = ({ setPortal }) => (
-    <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh', backgroundColor: '#e9ecef' }}>
-        <div className="text-center p-3 p-md-5">
-            <h1 className="display-4 fw-bold mb-5 text-dark">Welcome to JobMap</h1>
-            <p className="lead text-muted mb-4">Please select your portal to continue:</p>
-            <div className="d-flex gap-4 justify-content-center">
-                <div className="card shadow-lg p-4 cursor-pointer hover:shadow-xl transition-all duration-300" 
-                     onClick={() => setPortal('seeker')} style={{ maxWidth: '300px' }}>
-                    <div className="card-body">
-                        <i className="bi bi-person-fill fs-1 text-primary mb-3"></i>
-                        <h5 className="card-title fw-bold text-primary">Job Seeker Portal</h5>
-                        <p className="card-text text-muted small">Manage applications, build resumes, and get AI career advice.</p>
-                        <button className="btn btn-primary mt-2 w-100">Go to Seeker Login</button>
+                    <div className="flex flex-col sm:flex-row gap-4 justify-center">
+                        <PrimaryButton 
+                            onClick={() => document.getElementById('portal-selection')?.scrollIntoView({ behavior: 'smooth' })}
+                            className="text-lg px-8 py-4"
+                        >
+                            <i className="bi bi-rocket-takeoff me-2"></i>
+                            Start Your Journey
+                        </PrimaryButton>
+                        <button className="border border-gray-300 text-gray-700 px-8 py-4 rounded-xl font-medium hover:bg-gray-50 text-lg">
+                            <i className="bi bi-play-circle me-2"></i>
+                            Watch Demo
+                        </button>
                     </div>
                 </div>
-                <div className="card shadow-lg p-4 cursor-pointer hover:shadow-xl transition-all duration-300" 
-                     onClick={() => setPortal('company')} style={{ maxWidth: '300px' }}>
-                    <div className="card-body">
-                        <i className="bi bi-building-fill fs-1 text-success mb-3"></i>
-                        <h5 className="card-title fw-bold text-success">Company Portal</h5>
-                        <p className="card-text text-muted small">Post jobs, manage listings, and review candidate applications.</p>
-                        <button className="btn btn-success mt-2 w-100">Go to Company Login</button>
+            </section>
+
+            {/* Features Section */}
+            <section className="py-20 bg-gray-50/50">
+                <div className="container mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-3xl font-bold text-gray-800 mb-4">
+                            Why JobMap Stands Out
+                        </h2>
+                        <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+                            We've reimagined job searching from the ground up with cutting-edge technology 
+                            and user-centered design.
+                        </p>
+                    </div>
+
+                    <div className="grid md:grid-cols-3 gap-8">
+                        {[
+                            {
+                                icon: 'bi-map-fill',
+                                title: 'Interactive Job Maps',
+                                description: 'See opportunities visualized geographically. Filter by location, commute time, and company culture.',
+                                color: 'blue'
+                            },
+                            {
+                                icon: 'bi-robot',
+                                title: 'AI Career Coach',
+                                description: 'Get personalized resume suggestions, interview prep, and career path recommendations.',
+                                color: 'purple'
+                            },
+                            {
+                                icon: 'bi-trophy-fill',
+                                title: 'Hackathon Integration',
+                                description: 'Showcase your skills in coding competitions and get noticed by top tech companies.',
+                                color: 'amber'
+                            }
+                        ].map((feature, index) => (
+                            <GlassCard key={index} className="p-6 text-center">
+                                <div className={`w-16 h-16 bg-${feature.color}-100 text-${feature.color}-600 rounded-2xl flex items-center justify-center text-2xl mx-auto mb-4`}>
+                                    <i className={`bi ${feature.icon}`}></i>
+                                </div>
+                                <h3 className="text-xl font-bold text-gray-800 mb-3">
+                                    {feature.title}
+                                </h3>
+                                <p className="text-gray-600">
+                                    {feature.description}
+                                </p>
+                            </GlassCard>
+                        ))}
                     </div>
                 </div>
-            </div>
+            </section>
+
+            {/* Explore Opportunities Section */}
+            <section className="py-20 bg-white">
+                <div className="container mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-3xl font-bold text-gray-800 mb-4">
+                            Explore Opportunities
+                        </h2>
+                        <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+                            Discover various pathways to advance your career and showcase your skills
+                        </p>
+                    </div>
+
+                    <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+                        {/* Jobs Card */}
+                        <GlassCard className="p-6 text-center border-2 border-transparent hover:border-blue-200 cursor-pointer">
+                            <div className="w-20 h-20 bg-blue-100 text-blue-600 rounded-3xl flex items-center justify-center text-3xl mx-auto mb-6">
+                                <i className="bi bi-briefcase"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-3">
+                                Full-Time Jobs
+                            </h3>
+                            <p className="text-gray-600 mb-6">
+                                Discover permanent positions with competitive salaries and benefits from top companies worldwide.
+                            </p>
+                            <div className="space-y-3 text-left mb-6">
+                                {['Remote & On-site Options', 'Competitive Salaries', 'Career Growth', 'Health Benefits'].map((feature, i) => (
+                                    <div key={i} className="flex items-center gap-3 text-gray-600">
+                                        <i className="bi bi-check-circle-fill text-green-500"></i>
+                                        <span className="text-sm">{feature}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <button 
+                                onClick={() => setPortal('seeker')}
+                                className="w-full bg-blue-600 text-white py-3 px-6 rounded-xl font-semibold hover:bg-blue-700"
+                            >
+                                Browse Jobs
+                            </button>
+                        </GlassCard>
+
+                        {/* Internships Card */}
+                        <GlassCard className="p-6 text-center border-2 border-transparent hover:border-green-200 cursor-pointer">
+                            <div className="w-20 h-20 bg-green-100 text-green-600 rounded-3xl flex items-center justify-center text-3xl mx-auto mb-6">
+                                <i className="bi bi-mortarboard"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-3">
+                                Internships
+                            </h3>
+                            <p className="text-gray-600 mb-6">
+                                Gain valuable experience with internship opportunities designed for students and recent graduates.
+                            </p>
+                            <div className="space-y-3 text-left mb-6">
+                                {['Paid Positions', 'Mentorship Programs', 'Skill Development', 'Return Offers'].map((feature, i) => (
+                                    <div key={i} className="flex items-center gap-3 text-gray-600">
+                                        <i className="bi bi-check-circle-fill text-green-500"></i>
+                                        <span className="text-sm">{feature}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <button 
+                                onClick={() => setPortal('seeker')}
+                                className="w-full bg-green-600 text-white py-3 px-6 rounded-xl font-semibold hover:bg-green-700"
+                            >
+                                Find Internships
+                            </button>
+                        </GlassCard>
+
+                        {/* Hackathons Card */}
+                        <GlassCard className="p-6 text-center border-2 border-transparent hover:border-amber-200 cursor-pointer">
+                            <div className="w-20 h-20 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center text-3xl mx-auto mb-6">
+                                <i className="bi bi-trophy"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-3">
+                                Hackathons
+                            </h3>
+                            <p className="text-gray-600 mb-6">
+                                Participate in coding competitions to showcase your skills, win prizes, and get noticed by employers.
+                            </p>
+                            <div className="space-y-3 text-left mb-6">
+                                {['Cash Prizes', 'Networking Opportunities', 'Skill Recognition', 'Job Offers'].map((feature, i) => (
+                                    <div key={i} className="flex items-center gap-3 text-gray-600">
+                                        <i className="bi bi-check-circle-fill text-green-500"></i>
+                                        <span className="text-sm">{feature}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <button 
+                                onClick={() => setPortal('seeker')}
+                                className="w-full bg-amber-600 text-white py-3 px-6 rounded-xl font-semibold hover:bg-amber-700"
+                            >
+                                Join Hackathons
+                            </button>
+                        </GlassCard>
+                    </div>
+
+                    {/* View More Button */}
+                    <div className="text-center mt-12">
+                        <button 
+                            onClick={() => setShowExplorePage(true)}
+                            className="bg-indigo-600 text-white px-8 py-4 rounded-xl font-semibold text-lg hover:bg-indigo-700 transition-colors"
+                        >
+                            <i className="bi bi-search me-2"></i>
+                            View All Opportunities
+                        </button>
+                        <p className="text-gray-500 mt-4">
+                            Browse through hundreds of jobs, internships, and hackathons
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            {/* Portal Selection */}
+            <section id="portal-selection" className="py-20 bg-gray-50">
+                <div className="container mx-auto px-6">
+                    <div className="text-center mb-16">
+                        <h2 className="text-3xl font-bold text-gray-800 mb-4">
+                            Choose Your Path
+                        </h2>
+                        <p className="text-lg text-gray-600 max-w-2xl mx-auto">
+                            Whether you're looking for your next opportunity or seeking amazing talent, 
+                            we've got you covered.
+                        </p>
+                    </div>
+
+                    <div className="grid lg:grid-cols-2 gap-8 max-w-4xl mx-auto">
+                        {/* Job Seeker Card */}
+                        <GlassCard 
+                            onClick={() => setPortal('seeker')} 
+                            className="p-8 text-center cursor-pointer border-2 border-transparent hover:border-indigo-200"
+                        >
+                            <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-3xl flex items-center justify-center text-white text-3xl mx-auto mb-6">
+                                <i className="bi bi-person-workspace"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-3">
+                                Job Seeker
+                            </h3>
+                            <p className="text-gray-600 mb-6">
+                                Find your dream job, build an impressive resume, and track your applications 
+                                with our AI-powered platform.
+                            </p>
+                            <div className="space-y-3 text-left">
+                                {['AI Resume Builder', 'Interactive Job Maps', 'Application Tracker', 'Interview Prep'].map((feature, i) => (
+                                    <div key={i} className="flex items-center gap-3 text-gray-600">
+                                        <i className="bi bi-check-circle-fill text-green-500"></i>
+                                        <span>{feature}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <PrimaryButton className="w-full mt-8 py-4">
+                                Start Job Seeking
+                            </PrimaryButton>
+                        </GlassCard>
+
+                        {/* Company Card */}
+                        <GlassCard 
+                            onClick={() => setPortal('company')} 
+                            className="p-8 text-center cursor-pointer border-2 border-transparent hover:border-green-200"
+                        >
+                            <div className="w-20 h-20 bg-gradient-to-br from-green-500 to-teal-600 rounded-3xl flex items-center justify-center text-white text-3xl mx-auto mb-6">
+                                <i className="bi bi-building"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-800 mb-3">
+                                Employer
+                            </h3>
+                            <p className="text-gray-600 mb-6">
+                                Post jobs, manage candidates, and find the perfect talent with our 
+                                intelligent hiring platform.
+                            </p>
+                            <div className="space-y-3 text-left">
+                                {['Smart Candidate Matching', 'Application Management', 'Branded Career Pages', 'Analytics Dashboard'].map((feature, i) => (
+                                    <div key={i} className="flex items-center gap-3 text-gray-600">
+                                        <i className="bi bi-check-circle-fill text-green-500"></i>
+                                        <span>{feature}</span>
+                                    </div>
+                                ))}
+                            </div>
+                            <button className="w-full bg-gradient-to-r from-green-500 to-teal-600 text-white py-4 px-6 rounded-xl font-semibold shadow-md hover:shadow-lg mt-8">
+                                Start Hiring
+                            </button>
+                        </GlassCard>
+                    </div>
+                </div>
+            </section>
         </div>
-    </div>
-);
-
-
-const AuthComponent: FC = () => {
-    const { user, loading, error, clearError } = useAuth();
-    
-    // Load persisted choice on mount. If found, start on 'login', else start on 'selection'.
-    const [activePortal, setActivePortal] = useState<PortalView | null>(loadActivePortal()); 
-    const [portalView, setPortalView] = useState<'selection' | 'login' | 'register'>(
-        loadActivePortal() ? 'login' : 'selection'
     );
-    
-    const [authView, setAuthView] = useState<'login' | 'register'>('login');
+};
 
-    // Logic to select the portal and transition to login/register view
-    const handlePortalSelection = (portal: PortalView) => {
-        setActivePortal(portal);
-        saveActivePortal(portal); // ✅ SAVE TO LOCAL STORAGE
-        setPortalView('login'); 
-        setAuthView('login');
+// ===============================================
+// 8. ROOT APP WRAPPER
+// ===============================================
+
+const AuthFlowManager: FC = () => {
+    const { user, loading } = useAuth();
+    const [portal, setPortal] = useState<'seeker' | 'company' | null>(null);
+    const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+
+    useEffect(() => {
+        const saved = localStorage.getItem('activePortal');
+        if (saved) setPortal(saved as 'seeker' | 'company');
+    }, []);
+
+    const handlePortalSet = (p: 'seeker' | 'company') => {
+        setPortal(p);
+        localStorage.setItem('activePortal', p);
     };
-
 
     if (loading) {
         return (
-            <div className="d-flex justify-content-center align-items-center" style={{ height: '100vh' }}>
+            <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
                 <div className="text-center">
-                    <div className="spinner-border text-primary" role="status">
-                        <span className="visually-hidden">Loading...</span>
+                    <div className="w-16 h-16 bg-gradient-to-r from-indigo-500 to-purple-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <i className="bi bi-briefcase-fill text-white text-2xl"></i>
                     </div>
-                    <p className="mt-3 text-muted">Authenticating user...</p>
+                    <p className="text-gray-600 font-medium">Loading JobMap...</p>
                 </div>
             </div>
         );
     }
-    
-    // RENDER LOGIC: If authenticated, use the persisted role to render the dashboard.
-    if (user && !user.isAnonymous) {
-        const effectivePortal = activePortal || 'seeker';
 
-        if (effectivePortal === 'company') {
+    // User is logged in - show appropriate dashboard
+    if (user) {
+        if (portal === 'company') {
             return <CompanyDashboard />;
         }
-        return <Dashboard />; 
+        return <DashboardShell />;
     }
 
-    // RENDER LOGIC: If unauthenticated, show the selection or the appropriate login/register screen.
-    const renderAuthCards = () => {
-        if (activePortal === 'seeker') {
-            return authView === 'login' ? (
-                <LoginCard switchToRegister={() => setAuthView('register')} />
-            ) : (
-                <RegisterCard switchToLogin={() => setAuthView('login')} />
-            );
-        } else if (activePortal === 'company') {
-            return authView === 'login' ? (
-                <CompanyLoginCard switchToRegister={() => setAuthView('register')} />
-            ) : (
-                <CompanyRegisterCard switchToLogin={() => setAuthView('login')} />
-            );
-        }
-        // Fallback or should not be reached if state is managed correctly
-        return <LoginCard switchToRegister={() => setAuthView('register')} />;
-    };
+    // Show landing page if no portal selected
+    if (!portal) {
+        return <LandingPage setPortal={handlePortalSet} />;
+    }
 
-
+    // Show auth screens if portal selected but not logged in
     return (
-        <>
-            {portalView === 'selection' && <PortalSelection setPortal={handlePortalSelection} />}
-            {portalView !== 'selection' && (
-                <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh', backgroundColor: '#e9ecef' }}>
-                    <div className="text-center p-3 p-md-5">
-                        {/* Option to go back to selection */}
-                        <button 
-                            className="btn btn-sm btn-outline-secondary mb-3" 
-                            onClick={() => { 
-                                setPortalView('selection'); 
-                                setActivePortal(null); 
-                                localStorage.removeItem('activePortal'); // ✅ CLEAR ON CHANGE
-                            }}
-                        >
-                            <i className="bi bi-arrow-left me-2"></i> Change Portal
-                        </button>
-                        {renderAuthCards()}
-                    </div>
-                </div>
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center p-4">
+            {/* Back to portal selection */}
+            <button 
+                onClick={() => {
+                    setPortal(null);
+                    localStorage.removeItem('activePortal');
+                }}
+                className="absolute top-6 left-6 text-gray-600 hover:text-gray-800 font-medium flex items-center gap-2"
+            >
+                <i className="bi bi-arrow-left"></i>
+                Back to Home
+            </button>
+
+            {/* Auth Card */}
+            {authMode === 'login' ? (
+                portal === 'company' ? (
+                    <CompanyLoginCard switchToRegister={() => setAuthMode('register')} />
+                ) : (
+                    <LoginCard switchToRegister={() => setAuthMode('register')} />
+                )
+            ) : (
+                portal === 'company' ? (
+                    <CompanyRegisterCard switchToLogin={() => setAuthMode('login')} />
+                ) : (
+                    <RegisterCard switchToLogin={() => setAuthMode('login')} />
+                )
             )}
-            
-            {error && <CustomAlert 
-                message={error} 
-                onClose={clearError} 
-                isError={error.includes("Error:") || error.includes("failed") || error.includes("Invalid credentials")} 
-            />}
-        </>
+        </div>
     );
 };
 
-
-// ===============================================
-// 8. FINAL APP ROOT & EXPORTED TYPES 
-// ===============================================
+// Final App Component
 const FinalApp: FC = () => (
-    <div style={{ fontFamily: 'Inter, sans-serif' }}>
+    <div style={{ fontFamily: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }}>
+        {/* External Dependencies */}
         <script src="https://cdn.tailwindcss.com"></script>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
         <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
+        {/* Custom Styles */}
+        <style>{`
+            .line-clamp-2 {
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+        `}</style>
+
         <AuthProvider>
-            <AuthComponent />
+            <AuthFlowManager />
         </AuthProvider>
     </div>
 );
+
 export default FinalApp;
 
-// EXPORTED INTERFACES (Needed for Profile.tsx)
+// Export interfaces for other components
+export interface ProfileData { 
+    name: string; 
+    headline: string; 
+    location: string;
+    about: string;
+    profileImageUrl: string;
+    coverImageUrl: string;
+}
+
 export interface SocialLinks {
     linkedin: string;
     facebook: string;
     instagram: string;
 }
+
 export interface Experience {
     id: number;
     title: string;
     company: string;
     dates: string;
 }
+
 export interface Education {
     id: number;
     school: string;
     degree: string;
     dates: string;
 }
+
 export interface Skill {
     id: number;
     name: string;
 }
+
 export interface Project {
     id: number;
     title: string;
     description: string;
-}
-export interface ProfileData {
-    name: string;
-    headline: string;
-    location: string;
-    about: string;
-    profileImageUrl: string;
-    coverImageUrl: string;
-    socialLinks: SocialLinks;
-    experience: Experience[];
-    education: Education[];
-    skills: Skill[];
-    projects: Project[];
-}
-
-// DUMMY IMPLEMENTATION FOR IMAGE GENERATORS 
-const generateProfilePic = (name: string | null | undefined): string => {
-    if (!name) return "https://via.placeholder.com/128/9CA3AF/FFF?text=Profile";
-    const initials = name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
-    return `https://via.placeholder.com/128/9CA3AF/FFF?text=${initials}`;
-}
-const generateCoverPhoto = (name: string | null | undefined): string => {
-    if (!name) return "https://via.placeholder.com/1000x200/D1D5DB/FFF?text=Cover+Photo";
-    return `https://via.placeholder.com/1000x200/D1D5DB/FFF?text=Cover+Photo`;
-}
-
-function setJobData(data: DashboardJobData) {
-    throw new Error('Function not implemented.');
-}
-
-
-function setEditableProfile(arg0: {}) {
-    throw new Error('Function not implemented.');
-}
-
-
-function initialSignIn() {
-    throw new Error('Function not implemented.');
 }

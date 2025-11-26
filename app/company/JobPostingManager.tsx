@@ -1,8 +1,6 @@
 "use client";
 import { FC, useState, useEffect, useCallback } from 'react';
-import { collection, query, where, onSnapshot, deleteDoc, doc, updateDoc, orderBy } from 'firebase/firestore'; 
-
-// NOTE: Ensure these imports are correct based on your file structure
+import { collection, query, where, onSnapshot, deleteDoc, doc, updateDoc } from 'firebase/firestore'; 
 import { useAuth } from '@/app/page';
 import { db } from '@/app/lib/firebase';
 
@@ -20,10 +18,16 @@ export const JobPostingManager: FC = () => {
     const { user, setError, clearError } = useAuth();
     const [jobs, setJobs] = useState<JobData[]>([]);
     const [loading, setLoading] = useState(true);
+    
+    // Edit State
     const [isEditingId, setIsEditingId] = useState<string | null>(null);
-    const [editTitle, setEditTitle] = useState('');
+    const [editFormData, setEditFormData] = useState<Partial<JobData>>({});
 
     const companyId = user?.uid;
+
+    // Constants for dropdowns
+    const employmentTypes = ['Full-time', 'Part-time', 'Contract', 'Internship', 'Freelance'];
+    const salaryTypes = ['Yearly', 'Monthly', 'Hourly'];
 
     const fetchJobs = useCallback(() => {
         if (!companyId) return;
@@ -32,22 +36,19 @@ export const JobPostingManager: FC = () => {
         clearError();
 
         try {
-            // Query jobs where companyId matches the logged-in user's UID
             const jobsCollection = collection(db, 'jobPostings');
             const q = query(jobsCollection, where('companyId', '==', companyId));
 
-            // Use onSnapshot for real-time updates
             const unsubscribe = onSnapshot(q, (snapshot) => {
                 const fetchedJobs: JobData[] = snapshot.docs.map(d => ({
                     id: d.id,
                     ...d.data() as Omit<JobData, 'id'>
                 }));
                 
-                // Sort by creation date in memory (avoiding orderBy for security rule simplicity)
                 fetchedJobs.sort((a, b) => {
                     const dateA = a.createdAt instanceof Date ? a.createdAt.getTime() : a.createdAt.seconds;
                     const dateB = b.createdAt instanceof Date ? b.createdAt.getTime() : b.createdAt.seconds;
-                    return dateB - dateA; // Newest first
+                    return dateB - dateA;
                 });
                 
                 setJobs(fetchedJobs);
@@ -73,19 +74,13 @@ export const JobPostingManager: FC = () => {
         };
     }, [fetchJobs]);
     
-    // --- Handlers ---
-
     const handleDelete = async (jobId: string) => {
         if (!confirm("Are you sure you want to delete this job posting?")) return;
-        
         clearError();
         try {
             const jobRef = doc(db, 'jobPostings', jobId);
             await deleteDoc(jobRef);
             setError("Job posting deleted successfully.", false);
-            
-            // NOTE: Reloading company dashboard data to update job count would be ideal here,
-            // but that's handled by the parent component (CompanyDashboard).
         } catch (e) {
             console.error("Delete error:", e);
             setError("Failed to delete job posting.");
@@ -94,111 +89,237 @@ export const JobPostingManager: FC = () => {
     
     const handleStartEdit = (job: JobData) => {
         setIsEditingId(job.id);
-        setEditTitle(job.jobTitle);
+        setEditFormData({
+            jobTitle: job.jobTitle,
+            employmentType: job.employmentType,
+            city: job.city,
+            salary: job.salary,
+            salaryType: job.salaryType
+        });
+    };
+
+    const handleCancelEdit = () => {
+        setIsEditingId(null);
+        setEditFormData({});
+    };
+
+    const handleInputChange = (field: keyof JobData, value: any) => {
+        setEditFormData(prev => ({ ...prev, [field]: value }));
     };
 
     const handleUpdate = async () => {
-        if (!isEditingId || !editTitle.trim()) {
-            setError("Job title cannot be empty.");
+        if (!isEditingId) return;
+
+        // Basic Validation
+        if (!editFormData.jobTitle?.trim() || !editFormData.city?.trim() || !editFormData.salary) {
+            setError("Please fill in all required fields.");
             return;
         }
 
         clearError();
         try {
             const jobRef = doc(db, 'jobPostings', isEditingId);
-            await updateDoc(jobRef, { jobTitle: editTitle });
-            setError("Job title updated successfully.", false);
+            
+            // Create update object with only the fields we allow editing
+            const updateData = {
+                jobTitle: editFormData.jobTitle,
+                employmentType: editFormData.employmentType,
+                city: editFormData.city,
+                salary: Number(editFormData.salary), // Ensure number
+                salaryType: editFormData.salaryType
+            };
+
+            await updateDoc(jobRef, updateData);
+            setError("Job listing updated successfully.", false);
             setIsEditingId(null);
+            setEditFormData({});
         } catch (e) {
             console.error("Update error:", e);
-            setError("Failed to update job title.");
+            setError("Failed to update job listing.");
         }
     };
 
     const formatDate = (dateValue: JobData['createdAt']) => {
-        if (dateValue instanceof Date) {
-            return dateValue.toLocaleDateString();
-        }
-        if (typeof dateValue === 'object' && dateValue.seconds) {
-            return new Date(dateValue.seconds * 1000).toLocaleDateString();
-        }
+        if (dateValue instanceof Date) return dateValue.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        if (typeof dateValue === 'object' && dateValue.seconds) return new Date(dateValue.seconds * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
         return 'N/A';
     };
 
+    if (!user) return <div className="text-center py-5 text-danger fw-bold">Authentication required.</div>;
 
-    if (!user) return <p className="text-center text-danger">Authentication required to view postings.</p>;
-
-    if (loading) return <p className="text-center text-muted">Loading your job postings...</p>;
+    if (loading) {
+        return (
+            <div className="card border-0 shadow-sm rounded-4 overflow-hidden">
+                <div className="card-body p-0">
+                    <div className="p-4 border-bottom"><div className="bg-light rounded col-3" style={{height: '24px'}}></div></div>
+                    <div className="p-4">
+                        {[1, 2, 3].map(i => (
+                            <div key={i} className="d-flex gap-4 mb-4 align-items-center">
+                                <div className="bg-light rounded col-4" style={{height: '16px'}}></div>
+                                <div className="bg-light rounded col-2" style={{height: '16px'}}></div>
+                                <div className="bg-light rounded col-2" style={{height: '16px'}}></div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     if (jobs.length === 0) {
         return (
-            <div className="p-5 text-center bg-light rounded-3">
-                <i className="bi bi-info-circle fs-1 text-muted mb-3"></i>
-                <h3 className="text-dark">No Active Job Postings</h3>
-                <p className="lead text-muted">Use the "Post New Job" link to start hiring!</p>
+            <div className="card border-0 shadow-sm rounded-4 p-5 text-center bg-white">
+                <div className="mb-3 text-primary opacity-25"><i className="bi bi-briefcase fs-1"></i></div>
+                <h4 className="fw-bold text-dark">No Active Job Postings</h4>
+                <p className="text-muted mb-4">You haven't posted any jobs yet. Create your first listing to start hiring.</p>
+                <button className="btn btn-primary rounded-pill px-4 fw-medium">
+                    <i className="bi bi-plus-lg me-2"></i>Post a Job
+                </button>
             </div>
         );
     }
 
     return (
-        <div className="card shadow-lg">
-            <div className="card-header bg-white py-3">
-                <h4 className="mb-0 text-dark">Your Active Listings ({jobs.length})</h4>
+        <div className="card border-0 shadow-sm rounded-4 overflow-hidden bg-white">
+            <div className="card-header bg-white border-bottom px-4 py-3 d-flex justify-content-between align-items-center">
+                <h5 className="mb-0 fw-bold text-dark">Active Listings <span className="badge bg-light text-primary ms-2 rounded-pill">{jobs.length}</span></h5>
             </div>
-            <div className="card-body p-0">
-                <div className="table-responsive">
-                    <table className="table table-striped table-hover mb-0">
-                        <thead>
-                            <tr>
-                                <th>Job Title</th>
-                                <th>Type</th>
-                                <th>Location</th>
-                                <th>Salary</th>
-                                <th>Posted On</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {jobs.map(job => (
+            <div className="table-responsive">
+                <table className="table table-hover mb-0 align-middle">
+                    <thead className="bg-light">
+                        <tr>
+                            <th className="px-4 py-3 text-secondary small fw-bold text-uppercase" style={{width: '25%'}}>Job Title</th>
+                            <th className="py-3 text-secondary small fw-bold text-uppercase" style={{width: '15%'}}>Type</th>
+                            <th className="py-3 text-secondary small fw-bold text-uppercase" style={{width: '15%'}}>Location</th>
+                            <th className="py-3 text-secondary small fw-bold text-uppercase" style={{width: '20%'}}>Salary</th>
+                            <th className="py-3 text-secondary small fw-bold text-uppercase" style={{width: '10%'}}>Posted</th>
+                            <th className="text-end px-4 py-3 text-secondary small fw-bold text-uppercase" style={{width: '15%'}}>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {jobs.map(job => {
+                            const isEditing = isEditingId === job.id;
+                            return (
                                 <tr key={job.id}>
-                                    <td className="align-middle">
-                                        {isEditingId === job.id ? (
+                                    {/* Job Title */}
+                                    <td className="px-4 py-3">
+                                        {isEditing ? (
                                             <input
                                                 type="text"
                                                 className="form-control form-control-sm"
-                                                value={editTitle}
-                                                onChange={(e) => setEditTitle(e.target.value)}
+                                                value={editFormData.jobTitle}
+                                                onChange={(e) => handleInputChange('jobTitle', e.target.value)}
+                                                autoFocus
                                             />
                                         ) : (
-                                            <span className="fw-bold">{job.jobTitle}</span>
+                                            <span className="fw-bold text-dark">{job.jobTitle}</span>
                                         )}
                                     </td>
-                                    <td className="align-middle">{job.employmentType}</td>
-                                    <td className="align-middle">{job.city}</td>
-                                    <td className="align-middle">₹{job.salary} ({job.salaryType})</td>
-                                    <td className="align-middle small">{formatDate(job.createdAt)}</td>
-                                    <td className="align-middle d-flex gap-2">
-                                        {isEditingId === job.id ? (
-                                            <>
-                                                <button className="btn btn-sm btn-success" onClick={handleUpdate}>Save</button>
-                                                <button className="btn btn-sm btn-outline-secondary" onClick={() => setIsEditingId(null)}>Cancel</button>
-                                            </>
+
+                                    {/* Employment Type */}
+                                    <td>
+                                        {isEditing ? (
+                                            <select 
+                                                className="form-select form-select-sm"
+                                                value={editFormData.employmentType}
+                                                onChange={(e) => handleInputChange('employmentType', e.target.value)}
+                                            >
+                                                {employmentTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                                            </select>
                                         ) : (
-                                            <>
-                                                <button className="btn btn-sm btn-info text-white" onClick={() => handleStartEdit(job)}>
-                                                    <i className="bi bi-pencil-square"></i> Update
+                                            <span className="badge bg-info bg-opacity-10 text-info border border-info border-opacity-25 fw-normal px-2 py-1">
+                                                {job.employmentType}
+                                            </span>
+                                        )}
+                                    </td>
+
+                                    {/* Location */}
+                                    <td>
+                                        {isEditing ? (
+                                            <input
+                                                type="text"
+                                                className="form-control form-control-sm"
+                                                value={editFormData.city}
+                                                onChange={(e) => handleInputChange('city', e.target.value)}
+                                            />
+                                        ) : (
+                                            <span className="text-secondary small"><i className="bi bi-geo-alt me-1"></i>{job.city}</span>
+                                        )}
+                                    </td>
+
+                                    {/* Salary */}
+                                    <td>
+                                        {isEditing ? (
+                                            <div className="input-group input-group-sm">
+                                                <span className="input-group-text">₹</span>
+                                                <input
+                                                    type="number"
+                                                    className="form-control"
+                                                    value={editFormData.salary}
+                                                    onChange={(e) => handleInputChange('salary', e.target.value)}
+                                                    style={{maxWidth: '80px'}}
+                                                />
+                                                <select 
+                                                    className="form-select"
+                                                    value={editFormData.salaryType}
+                                                    onChange={(e) => handleInputChange('salaryType', e.target.value)}
+                                                >
+                                                    {salaryTypes.map(t => <option key={t} value={t}>{t}</option>)}
+                                                </select>
+                                            </div>
+                                        ) : (
+                                            <span className="text-dark fw-medium small">
+                                                ₹{job.salary.toLocaleString()} <span className="text-muted fw-normal">/{job.salaryType}</span>
+                                            </span>
+                                        )}
+                                    </td>
+
+                                    {/* Posted Date (Read Only) */}
+                                    <td className="text-muted small">{formatDate(job.createdAt)}</td>
+
+                                    {/* Actions */}
+                                    <td className="text-end px-4">
+                                        {isEditing ? (
+                                            <div className="btn-group">
+                                                <button 
+                                                    className="btn btn-sm btn-success" 
+                                                    onClick={handleUpdate} 
+                                                    title="Save Changes"
+                                                >
+                                                    <i className="bi bi-check-lg"></i>
                                                 </button>
-                                                <button className="btn btn-sm btn-danger" onClick={() => handleDelete(job.id)}>
-                                                    <i className="bi bi-trash"></i> Delete
+                                                <button 
+                                                    className="btn btn-sm btn-outline-secondary" 
+                                                    onClick={handleCancelEdit}
+                                                    title="Cancel"
+                                                >
+                                                    <i className="bi bi-x-lg"></i>
                                                 </button>
-                                            </>
+                                            </div>
+                                        ) : (
+                                            <div className="btn-group">
+                                                <button 
+                                                    className="btn btn-light btn-sm text-secondary hover-primary rounded-start" 
+                                                    onClick={() => handleStartEdit(job)}
+                                                    title="Edit Job"
+                                                >
+                                                    <i className="bi bi-pencil-square"></i>
+                                                </button>
+                                                <button 
+                                                    className="btn btn-light btn-sm text-danger hover-danger rounded-end" 
+                                                    onClick={() => handleDelete(job.id)}
+                                                    title="Delete Job"
+                                                >
+                                                    <i className="bi bi-trash"></i>
+                                                </button>
+                                            </div>
                                         )}
                                     </td>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
+                            );
+                        })}
+                    </tbody>
+                </table>
             </div>
         </div>
     );
