@@ -1,8 +1,9 @@
 // src/app/components/JobSearch.tsx
 
 "use client";
+
 import { FC, useState, useEffect, useCallback } from 'react';
-import { collection, query, onSnapshot, orderBy, where, getDocs, deleteDoc, doc, setDoc, addDoc } from 'firebase/firestore'; 
+import { collection, query, onSnapshot, orderBy, where, getDocs, deleteDoc, doc, setDoc, addDoc } from 'firebase/firestore';
 import { useAuth } from '@/app/page';
 import { db } from '@/app/lib/firebase';
 
@@ -17,8 +18,9 @@ interface JobPost {
     description: string;
     tags: string | string[];
     companyId: string;
-    isSaved: boolean; 
+    isSaved: boolean;
     isApplied: boolean;
+    isVerified?: boolean; 
 }
 
 // --- Job Card Component (Reusable) ---
@@ -29,8 +31,7 @@ interface JobCardProps {
 }
 
 const JobCard: FC<JobCardProps> = ({ job, onSave, onApply }) => {
-    // Safely handle tags
-    const tagsArray = typeof job.tags === 'string' 
+    const tagsArray = typeof job.tags === 'string'
         ? job.tags.split(',').map(tag => tag.trim()).filter(tag => tag)
         : Array.isArray(job.tags) ? job.tags : [];
 
@@ -39,39 +40,45 @@ const JobCard: FC<JobCardProps> = ({ job, onSave, onApply }) => {
             <div className="card-body p-4">
                 <div className="d-flex justify-content-between align-items-start mb-3">
                     <div className="d-flex gap-3">
-                        <div className="rounded-circle bg-light border d-flex align-items-center justify-content-center fw-bold text-primary" 
+                        <div className="rounded-circle bg-light border d-flex align-items-center justify-content-center fw-bold text-primary"
                              style={{width: '48px', height: '48px', fontSize: '1.2rem'}}>
                             {job.companyName.charAt(0)}
                         </div>
                         <div>
                             <h5 className="fw-bold text-dark mb-1">{job.jobTitle}</h5>
                             <p className="text-secondary mb-0 small fw-medium">
-                                {job.companyName} <span className="text-muted fw-normal">• {job.city}</span>
+                                {job.companyName}
+                                {job.isVerified && (
+                                    <span className="ms-1" title="Verified Company">
+                                        <i className="bi bi-patch-check-fill text-primary"></i>
+                                    </span>
+                                )}
+                                <span className="text-muted fw-normal ms-1">• {job.city}</span>
                             </p>
                         </div>
                     </div>
                     <div className="d-flex gap-2">
-                        <button 
-                            className={`btn btn-sm rounded-circle ${job.isSaved ? 'btn-light text-warning' : 'btn-light text-secondary'}`} 
+                        <button
+                            className={`btn btn-sm rounded-circle ${job.isSaved ? 'btn-light text-warning' : 'btn-light text-secondary'}`}
                             onClick={() => onSave(job, !job.isSaved)}
                             title={job.isSaved ? "Unsave" : "Save Job"}
                             style={{width: '36px', height: '36px'}}
                         >
-                            <i className={`bi ${job.isSaved ? 'bi-bookmark-fill' : 'bi-bookmark'}`}></i> 
+                            <i className={`bi ${job.isSaved ? 'bi-bookmark-fill' : 'bi-bookmark'}`}></i>
                         </button>
                     </div>
                 </div>
-                
+
                 <div className="mb-3">
                     <div className="d-flex flex-wrap gap-2 mb-3">
                         <span className="badge bg-light text-dark border fw-normal px-3 py-2">
                             <i className="bi bi-briefcase me-1 text-muted"></i> {job.employmentType}
                         </span>
                         <span className="badge bg-light text-success border border-success border-opacity-25 fw-normal px-3 py-2">
-                            <i className="bi bi-cash me-1"></i> ₹{job.salary.toLocaleString()} / {job.salaryType}
+                            <i className="bi bi-cash me-1"></i> ₹{typeof job.salary === 'number' ? job.salary.toLocaleString() : job.salary} / {job.salaryType}
                         </span>
                     </div>
-                    
+
                     <p className="text-secondary small mb-0 line-clamp-2" style={{lineHeight: '1.6'}}>
                         {job.description}
                     </p>
@@ -90,9 +97,9 @@ const JobCard: FC<JobCardProps> = ({ job, onSave, onApply }) => {
                             </span>
                         )}
                     </div>
-                    
-                    <button 
-                        className={`btn btn-sm px-4 rounded-pill fw-medium shadow-sm ${job.isApplied ? 'btn-success' : 'btn-primary'}`} 
+
+                    <button
+                        className={`btn btn-sm px-4 rounded-pill fw-medium shadow-sm ${job.isApplied ? 'btn-success' : 'btn-primary'}`}
                         onClick={() => onApply(job)}
                         disabled={job.isApplied}
                     >
@@ -114,77 +121,102 @@ export const JobSearch: FC = () => {
     const [jobs, setJobs] = useState<JobPost[]>([]);
     const [filteredJobs, setFilteredJobs] = useState<JobPost[]>([]);
     const [savedJobIds, setSavedJobIds] = useState<Set<string>>(new Set());
-    const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set()); 
+    const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
     const [loading, setLoading] = useState(true);
+    
+    // Company Data Map
+    const [companiesMap, setCompaniesMap] = useState<Record<string, {name: string, isVerified: boolean}>>({});
 
     // Filter states
     const [searchQuery, setSearchQuery] = useState('');
     const [locationFilter, setLocationFilter] = useState('');
     const [employmentTypeFilter, setEmploymentTypeFilter] = useState('');
     const [salaryTypeFilter, setSalaryTypeFilter] = useState('');
+    const [verifiedFilter, setVerifiedFilter] = useState(false); // NEW Filter State
 
-    // --- Fetch Job Postings and Status ---
+    // --- 1. Fetch Company Data Real-time ---
+    useEffect(() => {
+        const companiesRef = collection(db, 'companies');
+        const unsubscribeCompanies = onSnapshot(companiesRef, (snapshot) => {
+            const map: Record<string, {name: string, isVerified: boolean}> = {};
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                map[doc.id] = {
+                    name: data.companyName || 'Unknown Company',
+                    isVerified: data.isVerified || false
+                };
+            });
+            setCompaniesMap(map);
+        });
+        return () => unsubscribeCompanies();
+    }, []);
+
+    // --- 2. Fetch Job Postings and Status ---
     const fetchJobs = useCallback(() => {
         setLoading(true);
         clearError();
-        if (!user) {
-            setLoading(false);
-            return;
-        }
-
+        
         const jobsCollectionRef = collection(db, 'jobPostings');
-        const savedJobsCollectionRef = collection(db, 'userSavedJobs');
-        const applicationsCollectionRef = collection(db, 'jobApplications');
+        const savedJobsCollectionRef = user ? collection(db, 'userSavedJobs') : null;
+        const applicationsCollectionRef = user ? collection(db, 'jobApplications') : null;
 
         const unsubscribeJobs = onSnapshot(
-            query(jobsCollectionRef, orderBy('createdAt', 'desc')), 
+            query(jobsCollectionRef, orderBy('createdAt', 'desc')),
             async (jobSnapshot) => {
                 try {
-                    // 1. Get Saved Status
-                    const savedQuery = query(savedJobsCollectionRef, where('userId', '==', user.uid));
-                    const savedSnapshot = await getDocs(savedQuery);
-                    const currentSavedIds = new Set(savedSnapshot.docs.map(doc => doc.data().jobId));
-                    setSavedJobIds(currentSavedIds);
+                    let currentSavedIds = new Set<string>();
+                    let currentAppliedIds = new Set<string>();
 
-                    // 2. Get Applied Status
-                    const appliedQuery = query(applicationsCollectionRef, where('userId', '==', user.uid));
-                    const appliedSnapshot = await getDocs(appliedQuery);
-                    const currentAppliedIds = new Set(appliedSnapshot.docs.map(doc => doc.data().jobId));
+                    if (user && savedJobsCollectionRef && applicationsCollectionRef) {
+                        const savedQuery = query(savedJobsCollectionRef, where('userId', '==', user.uid));
+                        const savedSnapshot = await getDocs(savedQuery);
+                        currentSavedIds = new Set(savedSnapshot.docs.map(doc => doc.data().jobId));
+
+                        const appliedQuery = query(applicationsCollectionRef, where('userId', '==', user.uid));
+                        const appliedSnapshot = await getDocs(appliedQuery);
+                        currentAppliedIds = new Set(appliedSnapshot.docs.map(doc => doc.data().jobId));
+                    }
+
+                    setSavedJobIds(currentSavedIds);
                     setAppliedJobIds(currentAppliedIds);
 
-                    // 3. Map job postings
                     const fetchedJobs: JobPost[] = jobSnapshot.docs.map(d => {
                         const data = d.data();
                         const jobId = d.id;
+                        const companyId = data.companyId || '';
                         
                         let tags: string | string[] = data.tags || '';
                         if (Array.isArray(tags)) tags = tags.join(', ');
 
+                        const companyInfo = companiesMap[companyId];
+                        const companyName = companyInfo ? companyInfo.name : (data.companyName || '');
+                        const isVerified = companyInfo ? companyInfo.isVerified : false;
+
                         return {
                             id: jobId,
                             jobTitle: data.jobTitle || '',
-                            companyName: data.companyName || '',
+                            companyName: companyName,
                             employmentType: data.employmentType || '',
                             salary: data.salary || '',
                             salaryType: data.salaryType || '',
                             city: data.city || '',
                             description: data.description || '',
                             tags: tags,
-                            companyId: data.companyId || '',
-                            isSaved: currentSavedIds.has(jobId), 
+                            companyId: companyId,
+                            isSaved: currentSavedIds.has(jobId),
                             isApplied: currentAppliedIds.has(jobId),
+                            isVerified: isVerified
                         };
                     });
-                    
+
                     setJobs(fetchedJobs);
-                    setFilteredJobs(fetchedJobs);
                     setLoading(false);
                 } catch (error) {
                     console.error("Error processing jobs:", error);
                     setError("Failed to process job data");
                     setLoading(false);
                 }
-            }, 
+            },
             (error) => {
                 console.error("Firestore fetch error:", error);
                 setError("Failed to load jobs: " + (error as any).message);
@@ -193,7 +225,7 @@ export const JobSearch: FC = () => {
         );
 
         return () => unsubscribeJobs();
-    }, [user, setError, clearError]);
+    }, [user, setError, clearError, companiesMap]);
 
     useEffect(() => {
         const unsubscribe = fetchJobs();
@@ -202,13 +234,13 @@ export const JobSearch: FC = () => {
         };
     }, [fetchJobs]);
 
-    // --- Filter Jobs ---
+    // --- Filter Jobs Logic ---
     useEffect(() => {
         let result = jobs;
 
         if (searchQuery) {
             const query = searchQuery.toLowerCase();
-            result = result.filter(job => 
+            result = result.filter(job =>
                 job.jobTitle.toLowerCase().includes(query) ||
                 job.companyName.toLowerCase().includes(query) ||
                 job.description.toLowerCase().includes(query) ||
@@ -217,25 +249,30 @@ export const JobSearch: FC = () => {
         }
 
         if (locationFilter) {
-            result = result.filter(job => 
+            result = result.filter(job =>
                 job.city.toLowerCase().includes(locationFilter.toLowerCase())
             );
         }
 
         if (employmentTypeFilter) {
-            result = result.filter(job => 
+            result = result.filter(job =>
                 job.employmentType === employmentTypeFilter
             );
         }
 
         if (salaryTypeFilter) {
-            result = result.filter(job => 
+            result = result.filter(job =>
                 job.salaryType === salaryTypeFilter
             );
         }
 
+        // NEW: Verified Company Filter Logic
+        if (verifiedFilter) {
+            result = result.filter(job => job.isVerified);
+        }
+
         setFilteredJobs(result);
-    }, [jobs, searchQuery, locationFilter, employmentTypeFilter, salaryTypeFilter]);
+    }, [jobs, searchQuery, locationFilter, employmentTypeFilter, salaryTypeFilter, verifiedFilter]);
 
     // --- Action Handlers ---
     const handleSave = async (job: JobPost, isSaved: boolean) => {
@@ -285,13 +322,13 @@ export const JobSearch: FC = () => {
                 jobId: job.id,
                 jobTitle: job.jobTitle,
                 companyName: job.companyName,
-                companyId: job.companyId, 
+                companyId: job.companyId,
                 appliedAt: new Date(),
                 status: 'Submitted',
             });
-            
+
             setAppliedJobIds(prev => new Set(prev).add(job.id));
-            setError(`Application submitted for ${job.jobTitle}!`, false); 
+            setError(`Application submitted for ${job.jobTitle}!`, false);
 
         } catch (error) {
             console.error("Application error:", error);
@@ -304,13 +341,14 @@ export const JobSearch: FC = () => {
         setLocationFilter('');
         setEmploymentTypeFilter('');
         setSalaryTypeFilter('');
+        setVerifiedFilter(false); // Reset verified filter
     };
 
     const uniqueCities = [...new Set(jobs.map(job => job.city).filter(Boolean))];
     const uniqueEmploymentTypes = [...new Set(jobs.map(job => job.employmentType).filter(Boolean))];
     const uniqueSalaryTypes = [...new Set(jobs.map(job => job.salaryType).filter(Boolean))];
 
-    if (loading) return <div className="text-center py-5 text-muted"><div className="spinner-border text-primary me-2" role="status"></div> Loading listings...</div>;
+    if (loading && jobs.length === 0) return <div className="text-center py-5 text-muted"><div className="spinner-border text-primary me-2" role="status"></div> Loading listings...</div>;
 
     return (
         <div className="row g-4">
@@ -321,7 +359,7 @@ export const JobSearch: FC = () => {
                         <div className="card-body p-4">
                             <div className="d-flex justify-content-between align-items-center mb-4">
                                 <h6 className="fw-bold mb-0 text-dark">Filters</h6>
-                                <button 
+                                <button
                                     onClick={clearFilters}
                                     className="btn btn-sm btn-link text-decoration-none p-0 text-muted"
                                     style={{fontSize: '0.85rem'}}
@@ -329,14 +367,31 @@ export const JobSearch: FC = () => {
                                     Reset
                                 </button>
                             </div>
-                            
+
+                            {/* Verified Filter Switch */}
+                            <div className="mb-4 p-3 bg-light rounded-3 border border-light">
+                                <div className="form-check form-switch">
+                                    <input 
+                                        className="form-check-input" 
+                                        type="checkbox" 
+                                        id="verifiedFilterSwitch" 
+                                        checked={verifiedFilter}
+                                        onChange={(e) => setVerifiedFilter(e.target.checked)}
+                                    />
+                                    <label className="form-check-label small fw-bold text-dark d-flex align-items-center gap-1" htmlFor="verifiedFilterSwitch">
+                                        Verified Companies
+                                        <i className="bi bi-patch-check-fill text-primary"></i>
+                                    </label>
+                                </div>
+                            </div>
+
                             <div className="mb-4">
                                 <label className="form-label small text-muted fw-bold text-uppercase">Search</label>
                                 <div className="input-group">
                                     <span className="input-group-text bg-light border-0"><i className="bi bi-search text-muted"></i></span>
-                                    <input 
-                                        type="text" 
-                                        className="form-control bg-light border-0" 
+                                    <input
+                                        type="text"
+                                        className="form-control bg-light border-0"
                                         placeholder="Keywords..."
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
@@ -346,8 +401,8 @@ export const JobSearch: FC = () => {
 
                             <div className="mb-4">
                                 <label className="form-label small text-muted fw-bold text-uppercase">Location</label>
-                                <select 
-                                    className="form-select bg-light border-0 text-secondary" 
+                                <select
+                                    className="form-select bg-light border-0 text-secondary"
                                     value={locationFilter}
                                     onChange={(e) => setLocationFilter(e.target.value)}
                                 >
@@ -358,8 +413,8 @@ export const JobSearch: FC = () => {
 
                             <div className="mb-4">
                                 <label className="form-label small text-muted fw-bold text-uppercase">Job Type</label>
-                                <select 
-                                    className="form-select bg-light border-0 text-secondary" 
+                                <select
+                                    className="form-select bg-light border-0 text-secondary"
                                     value={employmentTypeFilter}
                                     onChange={(e) => setEmploymentTypeFilter(e.target.value)}
                                 >
@@ -370,8 +425,8 @@ export const JobSearch: FC = () => {
 
                             <div className="mb-2">
                                 <label className="form-label small text-muted fw-bold text-uppercase">Salary Period</label>
-                                <select 
-                                    className="form-select bg-light border-0 text-secondary" 
+                                <select
+                                    className="form-select bg-light border-0 text-secondary"
                                     value={salaryTypeFilter}
                                     onChange={(e) => setSalaryTypeFilter(e.target.value)}
                                 >
@@ -394,7 +449,7 @@ export const JobSearch: FC = () => {
                         Sorted by <span className="fw-bold text-dark">Newest</span>
                     </div>
                 </div>
-                
+
                 {filteredJobs.length === 0 ? (
                     <div className="text-center py-5 bg-white rounded-4 shadow-sm border border-light">
                         <div className="mb-3 text-muted opacity-25">
@@ -409,14 +464,14 @@ export const JobSearch: FC = () => {
                 ) : (
                     <div className="d-flex flex-column gap-3">
                         {filteredJobs.map(job => (
-                            <JobCard 
-                                key={job.id} 
-                                job={{ 
-                                    ...job, 
-                                    isApplied: appliedJobIds.has(job.id), 
-                                    isSaved: savedJobIds.has(job.id) 
-                                }} 
-                                onSave={handleSave} 
+                            <JobCard
+                                key={job.id}
+                                job={{
+                                    ...job,
+                                    isApplied: appliedJobIds.has(job.id),
+                                    isSaved: savedJobIds.has(job.id)
+                                }}
+                                onSave={handleSave}
                                 onApply={handleApply}
                             />
                         ))}

@@ -7,9 +7,24 @@ import {
     signInWithPopup,
     signOut,
     updateProfile,
+    deleteUser,
     User,
 } from 'firebase/auth';
-import { doc, getDoc, collection, getDocs, query, where } from 'firebase/firestore'; 
+import { 
+    doc, 
+    getDoc, 
+    setDoc, 
+    updateDoc, 
+    deleteDoc, 
+    collection, 
+    onSnapshot, 
+    query, 
+    orderBy, 
+    limit, 
+    where, 
+    addDoc, 
+    serverTimestamp 
+} from 'firebase/firestore'; 
 import React, { createContext, FC, ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 
 // ===============================================
@@ -34,27 +49,53 @@ const Hero = "https://placehold.co/700x500/e0e7ff/4338ca?text=JobMap+AI";
 const GlassCard: FC<{ children: ReactNode; className?: string; onClick?: () => void }> = ({ children, className = "", onClick }) => (
     <div 
         onClick={onClick}
-        className={`bg-white rounded-2xl shadow-sm border border-gray-100 ${onClick ? 'cursor-pointer' : ''} ${className}`}
+        className={`bg-white rounded-2xl shadow-sm border border-gray-100 ${onClick ? 'cursor-pointer transition-all hover:shadow-md' : ''} ${className}`}
     >
         {children}
     </div>
 );
 
-const SectionHeader: FC<{ title: string; subtitle?: string }> = ({ title, subtitle }) => (
-    <div className="mb-6">
-        <h2 className="text-2xl font-bold text-gray-800 mb-2">{title}</h2>
-        {subtitle && <p className="text-gray-600 text-lg">{subtitle}</p>}
+const SectionHeader: FC<{ title: string; subtitle?: string; action?: ReactNode }> = ({ title, subtitle, action }) => (
+    <div className="flex justify-between items-end mb-6">
+        <div>
+            <h2 className="text-2xl font-bold text-gray-800 mb-1">{title}</h2>
+            {subtitle && <p className="text-gray-600 text-sm">{subtitle}</p>}
+        </div>
+        {action}
     </div>
 );
 
 const PrimaryButton: FC<React.ButtonHTMLAttributes<HTMLButtonElement>> = ({ className, children, ...props }) => (
     <button 
-        className={`bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl font-semibold shadow-md border-0 ${className}`}
+        className={`bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-xl font-semibold shadow-md border-0 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${className}`}
         {...props}
     >
         {children}
     </button>
 );
+
+// --- Utility Functions ---
+
+const getUserData = async (uid: string) => {
+    const userRef = doc(db, 'users', uid);
+    try {
+        const docSnap = await getDoc(userRef as any);
+        if (docSnap.exists()) { 
+            return docSnap.data() as any; 
+        }
+        return { 
+            displayName: auth.currentUser?.displayName || 'User',
+            isVerified: false,
+            jobsApplied: 0,
+            savedJobs: 0,
+            interviews: 0,
+            profileStrength: 20
+        };
+    } catch(e) {
+        console.error("Error fetching user data:", e);
+        return { displayName: 'User', isVerified: false };
+    }
+};
 
 // ===============================================
 // 3. AUTH CONTEXT & UTILS
@@ -120,7 +161,7 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
         <AuthContext.Provider value={{ user, loading, error, setError, clearError, auth, db }}>
             {children}
             {error && (
-                <div className={`fixed bottom-5 right-5 px-6 py-3 rounded-xl shadow-2xl text-white z-50 ${isError ? 'bg-red-500' : 'bg-green-500'}`}>
+                <div className={`fixed bottom-5 right-5 px-6 py-3 rounded-xl shadow-2xl text-white z-50 animate-bounce ${isError ? 'bg-red-500' : 'bg-green-500'}`}>
                     <div className="flex items-center gap-3">
                         <i className={`bi ${isError ? 'bi-exclamation-circle-fill' : 'bi-check-circle-fill'}`}></i>
                         <span className="font-medium">{error}</span>
@@ -133,7 +174,689 @@ export const AuthProvider: FC<{ children: ReactNode }> = ({ children }) => {
 };
 
 // ===============================================
-// 4. AUTH & ONBOARDING CARDS
+// 4. APTITUDE TEST COMPONENT
+// ===============================================
+
+const APTITUDE_TOPICS = [
+    { id: 'logical', name: 'Logical Reasoning', icon: 'bi-puzzle-fill', color: 'indigo' },
+    { id: 'quantitative', name: 'Quantitative Aptitude', icon: 'bi-calculator-fill', color: 'emerald' },
+    { id: 'verbal', name: 'Verbal Ability', icon: 'bi-chat-quote-fill', color: 'rose' },
+    { id: 'technical', name: 'Technical Basics', icon: 'bi-cpu-fill', color: 'amber' },
+];
+
+const QUESTION_BANK: Record<string, { q: string; options: string[]; answer: number }[]> = {
+    logical: [ { q: "Look at this series: 2, 1, (1/2), (1/4), ... What number should come next?", options: ["(1/3)", "(1/8)", "(2/8)", "(1/16)"], answer: 1 } ],
+    quantitative: [ { q: "What is the average of the first 50 natural numbers?", options: ["25.30", "25.5", "25.00", "12.25"], answer: 1 } ],
+    verbal: [ { q: "Antonym of: ENORMOUS", options: ["Soft", "Average", "Tiny", "Weak"], answer: 2 } ],
+    technical: [ { q: "What does HTML stand for?", options: ["Hyper Text Preprocessor", "Hyper Text Markup Language", "Hyper Text Multiple Language", "Hyper Tool Multi Language"], answer: 1 } ]
+};
+Object.keys(QUESTION_BANK).forEach(key => { while(QUESTION_BANK[key].length < 5) { QUESTION_BANK[key].push(QUESTION_BANK[key][0]); } });
+
+const AptitudeTest: FC<{ onBack?: () => void, requestLogin?: () => void }> = ({ onBack, requestLogin }) => {
+    const { user } = useAuth();
+    const [stage, setStage] = useState<'menu' | 'quiz' | 'result'>('menu');
+    const [selectedTopic, setSelectedTopic] = useState<string>('');
+    const [questions, setQuestions] = useState<typeof QUESTION_BANK['logical']>([]);
+    const [currentQIndex, setCurrentQIndex] = useState(0);
+    const [userAnswers, setUserAnswers] = useState<number[]>([]);
+    const [score, setScore] = useState(0);
+    const [trialsLeft, setTrialsLeft] = useState<number>(3);
+
+    useEffect(() => {
+        if (!user) {
+            const savedTrials = localStorage.getItem('aptitude_trials');
+            setTrialsLeft(savedTrials ? parseInt(savedTrials) : 3);
+        } else {
+            setTrialsLeft(999); 
+        }
+    }, [user]);
+
+    const startTest = (topicId: string) => {
+        if (!user && trialsLeft <= 0) {
+            if (requestLogin) requestLogin();
+            else alert("You've used all your free trials. Please log in to continue.");
+            return;
+        }
+        if (!user) {
+            const newTrials = trialsLeft - 1;
+            setTrialsLeft(newTrials);
+            localStorage.setItem('aptitude_trials', newTrials.toString());
+        }
+        const topicQuestions = [...QUESTION_BANK[topicId]];
+        const shuffled = topicQuestions.sort(() => 0.5 - Math.random()).slice(0, 5);
+        setQuestions(shuffled);
+        setSelectedTopic(topicId);
+        setCurrentQIndex(0);
+        setUserAnswers([]);
+        setScore(0);
+        setStage('quiz');
+    };
+
+    const handleAnswer = (optionIndex: number) => {
+        const newAnswers = [...userAnswers];
+        newAnswers[currentQIndex] = optionIndex;
+        setUserAnswers(newAnswers);
+    };
+
+    const nextQuestion = () => {
+        if (currentQIndex < questions.length - 1) {
+            setCurrentQIndex(currentQIndex + 1);
+        } else {
+            let calcScore = 0;
+            questions.forEach((q, idx) => { if (userAnswers[idx] === q.answer) calcScore++; });
+            setScore(calcScore);
+            setStage('result');
+        }
+    };
+
+    if (stage === 'menu') {
+        return (
+            <div className="animate-fade-in-up">
+                <div className="flex items-center justify-between mb-8">
+                    <div><h2 className="text-2xl font-bold text-gray-800">Skill Assessment</h2><p className="text-gray-600">Prove your skills and get a badge on your profile.</p></div>
+                    {!user && (<div className="bg-amber-100 text-amber-800 px-4 py-2 rounded-xl font-medium text-sm flex items-center gap-2"><i className="bi bi-exclamation-circle-fill"></i> {trialsLeft} Free Trials Left</div>)}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {APTITUDE_TOPICS.map((topic) => (
+                        <GlassCard key={topic.id} onClick={() => startTest(topic.id)} className="p-6 group hover:border-indigo-300 relative overflow-hidden">
+                            <div className={`absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity text-${topic.color}-600`}><i className={`bi ${topic.icon} text-8xl transform rotate-12 translate-x-4 -translate-y-4`}></i></div>
+                            <div className="relative z-10">
+                                <div className={`w-14 h-14 rounded-2xl bg-${topic.color}-100 text-${topic.color}-600 flex items-center justify-center text-2xl mb-4 shadow-sm group-hover:scale-110 transition-transform`}><i className={`bi ${topic.icon}`}></i></div>
+                                <h3 className="text-xl font-bold text-gray-800 mb-2">{topic.name}</h3>
+                                <p className="text-gray-500 text-sm mb-4">10 Questions • 15 Minutes</p>
+                                <div className="flex items-center gap-2 text-indigo-600 font-medium text-sm">Start Test <i className="bi bi-arrow-right group-hover:translate-x-1 transition-transform"></i></div>
+                            </div>
+                        </GlassCard>
+                    ))}
+                </div>
+            </div>
+        );
+    }
+
+    if (stage === 'quiz') {
+        const question = questions[currentQIndex];
+        const progress = ((currentQIndex + 1) / questions.length) * 100;
+        return (
+            <div className="max-w-2xl mx-auto animate-fade-in">
+                <div className="flex items-center justify-between mb-6">
+                    <button onClick={() => setStage('menu')} className="text-gray-500 hover:text-gray-800"><i className="bi bi-x-lg text-xl"></i></button>
+                    <span className="font-bold text-gray-700">Question {currentQIndex + 1}/{questions.length}</span>
+                    <span className="text-indigo-600 font-medium text-sm">{APTITUDE_TOPICS.find(t => t.id === selectedTopic)?.name}</span>
+                </div>
+                <div className="h-2 bg-gray-100 rounded-full mb-8 overflow-hidden"><div className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-500 ease-out" style={{ width: `${progress}%` }}></div></div>
+                <GlassCard className="p-8 mb-6"><h3 className="text-xl font-bold text-gray-800 mb-8 leading-relaxed">{question.q}</h3><div className="space-y-3">{question.options.map((opt, idx) => { const isSelected = userAnswers[currentQIndex] === idx; return (<button key={idx} onClick={() => handleAnswer(idx)} className={`w-full text-left p-4 rounded-xl border-2 transition-all flex items-center justify-between ${isSelected ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-gray-100 hover:border-indigo-200 text-gray-600'}`}><span className="font-medium">{opt}</span>{isSelected && <i className="bi bi-check-circle-fill text-indigo-600"></i>}</button>); })}</div></GlassCard>
+                <div className="flex justify-end"><PrimaryButton onClick={nextQuestion} disabled={userAnswers[currentQIndex] === undefined} className="w-full sm:w-auto">{currentQIndex === questions.length - 1 ? 'Submit Test' : 'Next Question'}</PrimaryButton></div>
+            </div>
+        );
+    }
+
+    if (stage === 'result') {
+        const percentage = (score / questions.length) * 100;
+        const isPass = percentage >= 60;
+        return (
+            <div className="max-w-md mx-auto text-center animate-fade-in-up">
+                <GlassCard className="p-8 border-t-8 border-t-indigo-500">
+                    <div className="w-24 h-24 mx-auto mb-6 relative flex items-center justify-center"><div className={`absolute inset-0 rounded-full opacity-20 ${isPass ? 'bg-green-500' : 'bg-red-500'}`}></div><i className={`bi ${isPass ? 'bi-trophy-fill text-green-600' : 'bi-emoji-frown-fill text-red-500'} text-4xl`}></i></div>
+                    <h2 className="text-3xl font-bold text-gray-800 mb-2">{isPass ? 'Great Job!' : 'Keep Practicing'}</h2>
+                    <p className="text-gray-600 mb-8">You scored <span className="font-bold text-indigo-600 text-xl">{score}/{questions.length}</span></p>
+                    <div className="space-y-3"><PrimaryButton onClick={() => setStage('menu')} className="w-full">Take Another Test</PrimaryButton></div>
+                </GlassCard>
+            </div>
+        );
+    }
+
+    return null;
+};
+
+// ===============================================
+// 5. HACKATHON BROWSER COMPONENT
+// ===============================================
+
+const HackathonList: FC = () => {
+    const { user, setError } = useAuth();
+    const [hackathons, setHackathons] = useState<any[]>([]);
+    const [companiesMap, setCompaniesMap] = useState<Record<string, boolean>>({});
+    const [appliedIds, setAppliedIds] = useState<Set<string>>(new Set());
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const unsubCompanies = onSnapshot(collection(db, 'companies'), (snap) => {
+            const map: Record<string, boolean> = {};
+            snap.forEach(doc => {
+                const d = doc.data();
+                if(d.companyName) map[d.companyName] = d.isVerified || false;
+                map[doc.id] = d.isVerified || false;
+            });
+            setCompaniesMap(map);
+        });
+
+        const unsubHackathons = onSnapshot(query(collection(db, 'hackathons'), orderBy('createdAt', 'desc')), (snap) => {
+            const data = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setHackathons(data);
+            setLoading(false);
+        });
+
+        let unsubApps = () => {};
+        if (user) {
+            unsubApps = onSnapshot(query(collection(db, 'hackathonApplications'), where('userId', '==', user.uid)), (snap) => {
+                const ids = new Set(snap.docs.map(doc => doc.data().hackathonId));
+                setAppliedIds(ids);
+            });
+        }
+
+        return () => { unsubCompanies(); unsubHackathons(); unsubApps(); };
+    }, [user]);
+
+    const handleApply = async (hackathon: any) => {
+        if (!user) return alert("Please login to apply");
+        try {
+            await addDoc(collection(db, 'hackathonApplications'), {
+                userId: user.uid,
+                hackathonId: hackathon.id,
+                hackathonTitle: hackathon.title,
+                companyName: hackathon.companyName,
+                appliedAt: serverTimestamp(),
+                status: 'registered'
+            });
+        } catch (e) { console.error(e); setError("Failed to apply", true); }
+    };
+
+    if (loading) return <div className="text-center py-10"><div className="spinner-border text-primary"></div></div>;
+
+    return (
+        <div className="space-y-6 animate-fade-in">
+            <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold text-gray-800">Upcoming Hackathons</h2>
+                <div className="text-sm text-gray-500">Found {hackathons.length} events</div>
+            </div>
+            <div className="grid gap-6">
+                {hackathons.map(hack => {
+                    const isVerified = companiesMap[hack.companyId] || companiesMap[hack.companyName];
+                    const isApplied = appliedIds.has(hack.id);
+
+                    return (
+                        <GlassCard key={hack.id} className="p-6 hover:border-amber-200 transition-colors">
+                            <div className="flex flex-col md:flex-row gap-6">
+                                <div className="flex-shrink-0 w-full md:w-24 h-24 bg-amber-50 rounded-2xl flex flex-col items-center justify-center text-amber-600 border border-amber-100">
+                                    <span className="text-xs font-bold uppercase tracking-wider">{new Date(hack.startDate).toLocaleString('default', { month: 'short' })}</span>
+                                    <span className="text-3xl font-bold">{new Date(hack.startDate).getDate()}</span>
+                                </div>
+                                <div className="flex-1">
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <h3 className="text-xl font-bold text-gray-900 mb-1">{hack.title}</h3>
+                                            <div className="flex items-center gap-2 text-gray-600 font-medium mb-2">
+                                                <span>{hack.companyName}</span>
+                                                {isVerified && <i className="bi bi-patch-check-fill text-indigo-600" title="Verified Organizer"></i>}
+                                            </div>
+                                        </div>
+                                        <span className="bg-green-100 text-green-700 text-xs font-bold px-3 py-1 rounded-full">{hack.prizePool}</span>
+                                    </div>
+                                    <p className="text-gray-600 text-sm mb-4 line-clamp-2">{hack.description}</p>
+                                    <div className="flex flex-wrap gap-4 text-sm text-gray-500">
+                                        <span className="flex items-center gap-1"><i className="bi bi-geo-alt"></i> {hack.location}</span>
+                                        <span className="flex items-center gap-1"><i className="bi bi-people"></i> {hack.maxParticipants || 'Unlimited'} spots</span>
+                                    </div>
+                                </div>
+                                <div className="flex flex-col justify-center min-w-[140px]">
+                                    <button onClick={() => handleApply(hack)} disabled={isApplied} className={`w-full py-2.5 rounded-xl font-semibold shadow-sm transition-all ${isApplied ? 'bg-green-100 text-green-700 cursor-default' : 'bg-gray-900 text-white hover:bg-black'}`}>
+                                        {isApplied ? <span><i className="bi bi-check-lg me-1"></i> Registered</span> : 'Register Now'}
+                                    </button>
+                                    <div className="text-center mt-2"><span className="text-xs text-muted">Deadline: {new Date(hack.registrationDeadline).toLocaleDateString()}</span></div>
+                                </div>
+                            </div>
+                        </GlassCard>
+                    );
+                })}
+            </div>
+        </div>
+    );
+};
+
+// ===============================================
+// 6. DASHBOARD CONTENT
+// ===============================================
+
+// Mock Data Interfaces
+interface DashboardJobData { 
+    jobsApplied: number; 
+    savedJobs: number; 
+    interviews: number; 
+    newMatches: number; 
+    displayName: string; 
+    email: string;
+    userId: string;
+}
+
+interface Hackathon { 
+    id: string; 
+    title: string; 
+    description: string; 
+    companyName: string; 
+    prizePool: string; 
+    isVirtual: boolean; 
+    skills: string[]; 
+    startDate: string;
+    endDate: string;
+    location: string;
+}
+
+// Stat Card Component
+const StatCard: FC<{ title: string; value: number; icon: string; color: string; subtitle: string }> = ({ title, value, icon, color, subtitle }) => (
+    <GlassCard className="p-6 h-full">
+        <div className="flex justify-between items-start">
+            <div>
+                <p className="text-gray-500 text-sm font-medium mb-1">{title}</p>
+                <h3 className="text-3xl font-bold text-gray-800 mb-2">{value}</h3>
+                <p className="text-gray-400 text-sm">{subtitle}</p>
+            </div>
+            <div className={`p-3 rounded-2xl bg-${color}-100 text-${color}-600`}>
+                <i className={`bi ${icon} text-xl`}></i>
+            </div>
+        </div>
+    </GlassCard>
+);
+
+// Hackathon Card Component
+const HackathonCard: FC<{ hackathon: Hackathon }> = ({ hackathon }) => (
+    <GlassCard className="h-full flex flex-col">
+        <div className="p-6 flex-grow">
+            <div className="flex justify-between items-start mb-4">
+                <span className={`px-3 py-1 rounded-full text-xs font-medium ${hackathon.isVirtual ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
+                    {hackathon.isVirtual ? '🌐 Virtual' : '🏢 On-Site'}
+                </span>
+                <span className="text-amber-600 font-bold text-sm">
+                    <i className="bi bi-trophy-fill mr-1"></i> {hackathon.prizePool}
+                </span>
+            </div>
+            <h5 className="font-bold text-lg text-gray-800 mb-2">{hackathon.title}</h5>
+            <p className="text-indigo-600 text-sm font-medium mb-3">{hackathon.companyName}</p>
+            <p className="text-gray-600 text-sm mb-4 line-clamp-2">{hackathon.description}</p>
+            <div className="flex gap-2 flex-wrap">
+                {hackathon.skills.slice(0, 3).map((skill, index) => (
+                    <span key={index} className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
+                        {skill}
+                    </span>
+                ))}
+                {hackathon.skills.length > 3 && (
+                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
+                        +{hackathon.skills.length - 3} more
+                    </span>
+                )}
+            </div>
+        </div>
+        <div className="p-4 border-t border-gray-100">
+            <button className="w-full bg-gray-50 hover:bg-gray-100 text-gray-700 font-medium py-2 px-4 rounded-xl">
+                View Details
+            </button>
+        </div>
+    </GlassCard>
+);
+
+// Enhanced Dashboard Content Component
+const JobSeekerDashboardContent: FC<{ setCurrentMenu: (m: string) => void; userData: any }> = ({ setCurrentMenu, userData }) => {
+    const { user } = useAuth();
+    const [geminiPrompt, setGeminiPrompt] = useState('');
+    const [geminiLoading, setGeminiLoading] = useState(false);
+    const [companiesMap, setCompaniesMap] = useState<Record<string, boolean>>({});
+    const [recentJobs, setRecentJobs] = useState<any[]>([]);
+    const [recommendedJobs, setRecommendedJobs] = useState<any[]>([]);
+    const [recentApps, setRecentApps] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    
+    // Mock data
+    const jobData: DashboardJobData = {
+        jobsApplied: 14, 
+        savedJobs: 8, 
+        interviews: 3, 
+        newMatches: 12,
+        displayName: user?.displayName || 'Job Seeker',
+        email: user?.email || '',
+        userId: user?.uid || ''
+    };
+    
+    const hackathons: Hackathon[] = [
+        { 
+            id: '1', 
+            title: 'Global AI Challenge', 
+            description: 'Build innovative AI solutions for real-world problems. Open to all skill levels.', 
+            companyName: 'Google AI', 
+            prizePool: '$50,000', 
+            isVirtual: true, 
+            skills: ['Python', 'TensorFlow', 'Machine Learning'],
+            startDate: '2024-03-15',
+            endDate: '2024-03-17',
+            location: 'Virtual'
+        },
+        { 
+            id: '2', 
+            title: 'FinTech Innovation Hackathon', 
+            description: 'Create the next generation of financial technology solutions.', 
+            companyName: 'Stripe', 
+            prizePool: '$25,000', 
+            isVirtual: false, 
+            skills: ['React', 'Node.js', 'Blockchain'],
+            startDate: '2024-04-10',
+            endDate: '2024-04-12',
+            location: 'San Francisco, CA'
+        },
+    ];
+
+    useEffect(() => {
+        // 1. Verified Companies Map
+        const unsubComp = onSnapshot(collection(db, 'companies'), (snap) => {
+            const map: Record<string, boolean> = {};
+            snap.forEach(doc => {
+                const d = doc.data();
+                if (d.companyName) map[d.companyName] = d.isVerified || false;
+                map[doc.id] = d.isVerified || false;
+            });
+            setCompaniesMap(map);
+        });
+
+        // 2. Recent & Recommended Jobs
+        const unsubJobs = onSnapshot(query(collection(db, 'jobPostings'), orderBy('createdAt', 'desc'), limit(8)), (snap) => {
+            const allJobs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            setRecentJobs(allJobs.slice(0, 4));
+            // Simulate AI match score for demo
+            const recs = allJobs.slice(0, 4).map((job: any) => ({
+                ...job,
+                matchScore: Math.floor(Math.random() * (98 - 75) + 75)
+            }));
+            setRecommendedJobs(recs);
+        });
+
+        // 3. Activity
+        let unsubApps = () => {};
+        if (user) {
+             unsubApps = onSnapshot(query(collection(db, 'jobApplications'), where('userId', '==', user.uid), orderBy('appliedAt', 'desc'), limit(3)), (snap) => {
+                setRecentApps(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+            });
+        }
+
+        setLoading(false);
+        return () => { unsubComp(); unsubJobs(); unsubApps(); };
+    }, [user]);
+
+    const stats = {
+        applied: recentApps.length, 
+        saved: userData?.savedJobs || 0,
+        interviews: userData?.interviews || 0,
+        matches: recommendedJobs.length || 0
+    };
+
+    const handleGeminiQuery = async () => {
+        if (!geminiPrompt.trim()) return;
+        
+        setGeminiLoading(true);
+        // Simulate API call
+        setTimeout(() => {
+            setGeminiLoading(false);
+            setGeminiPrompt('');
+        }, 2000);
+    };
+
+    return (
+        <div className="space-y-8 animate-fade-in">
+            {/* Welcome Header */}
+            <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-3xl p-8 text-white relative overflow-hidden shadow-lg">
+                <div className="relative z-10">
+                    <h1 className="text-3xl font-bold mb-2">
+                        Welcome back, {userData?.displayName || 'User'}! 👋
+                        {userData?.isVerified && <i className="bi bi-patch-check-fill ms-2 text-white/90" title="Verified User"></i>}
+                    </h1>
+                    <p className="text-indigo-100 text-lg max-w-2xl">
+                        You have <span className="font-semibold text-white">{stats.interviews} interviews</span> coming up this week. 
+                        Ready to ace them?
+                    </p>
+                    <div className="flex gap-4 mt-6">
+                        <button 
+                            onClick={() => setCurrentMenu('jobSearch')} 
+                            className="bg-white text-indigo-600 px-6 py-3 rounded-xl font-semibold shadow-lg hover:bg-indigo-50 transition-colors"
+                        >
+                            <i className="bi bi-search me-2"></i>Find Jobs
+                        </button>
+                        <button 
+                            onClick={() => setCurrentMenu('resume')} 
+                            className="bg-indigo-400 text-white border border-indigo-300 px-6 py-3 rounded-xl font-semibold hover:bg-indigo-300 transition-colors"
+                        >
+                            <i className="bi bi-file-earmark-person me-2"></i>Edit Resume
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Stats Grid */}
+            <div>
+                <SectionHeader title="Your Job Search at a Glance" />
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                    <StatCard 
+                        title="Recent Applications" 
+                        value={stats.applied} 
+                        icon="bi-send-check-fill" 
+                        color="blue"
+                        subtitle="Total submitted"
+                    />
+                    <StatCard 
+                        title="Saved Jobs" 
+                        value={stats.saved} 
+                        icon="bi-bookmark-heart-fill" 
+                        color="rose"
+                        subtitle="Ready to apply"
+                    />
+                    <StatCard 
+                        title="Interviews" 
+                        value={stats.interviews} 
+                        icon="bi-calendar-check-fill" 
+                        color="green"
+                        subtitle="Scheduled"
+                    />
+                    <StatCard 
+                        title="New Matches" 
+                        value={stats.matches} 
+                        icon="bi-lightning-fill" 
+                        color="amber"
+                        subtitle="This week"
+                    />
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* AI Assistant & Recommended Jobs - Left Column */}
+                <div className="lg:col-span-2 space-y-8">
+                    {/* AI Assistant */}
+                    <GlassCard>
+                        <div className="p-6 border-b border-gray-100">
+                            <div className="flex items-center gap-4">
+                                <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center text-white text-xl shadow-lg">
+                                    <i className="bi bi-robot"></i>
+                                </div>
+                                <div>
+                                    <h3 className="text-xl font-bold text-gray-800">AI Career Assistant</h3>
+                                    <p className="text-gray-600">Get personalized advice for your job search</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="p-6">
+                            <div className="space-y-4 mb-6">
+                                <div className="flex justify-start">
+                                    <div className="bg-gray-100 rounded-2xl rounded-tl-none px-4 py-3 max-w-[80%]">
+                                        <p className="text-gray-700">
+                                            Hello! Based on your activity, I recommend focusing on technical interview preparation. 
+                                            Would you like me to generate some practice questions?
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="flex gap-3">
+                                <input
+                                    type="text"
+                                    className="flex-1 border border-gray-200 rounded-xl px-4 py-3 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
+                                    placeholder="Ask me anything about your job search..."
+                                    value={geminiPrompt}
+                                    onChange={(e) => setGeminiPrompt(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handleGeminiQuery()}
+                                />
+                                <button 
+                                    onClick={handleGeminiQuery}
+                                    disabled={geminiLoading}
+                                    className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {geminiLoading ? (
+                                        <i className="bi bi-arrow-clockwise animate-spin"></i>
+                                    ) : (
+                                        <i className="bi bi-send-fill"></i>
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+                    </GlassCard>
+
+                    {/* Recommended Jobs */}
+                    <section>
+                        <SectionHeader 
+                            title="Recommended for You" 
+                            subtitle="Jobs matching your skills" 
+                            action={<button onClick={() => setCurrentMenu('jobSearch')} className="text-indigo-600 font-medium text-sm hover:underline">View All</button>} 
+                        />
+                        <div className="space-y-4">
+                            {recommendedJobs.length > 0 ? recommendedJobs.map((job: any) => {
+                                const isVerified = companiesMap[job.companyName] || companiesMap[job.companyId];
+                                return (
+                                    <GlassCard key={job.id} className="p-5 flex flex-col sm:flex-row gap-5 items-center hover:border-indigo-200 group transition-all">
+                                        <div className="w-14 h-14 rounded-xl bg-gray-50 flex items-center justify-center text-2xl text-gray-700 shadow-sm font-bold">
+                                            {job.companyName?.charAt(0) || 'J'}
+                                        </div>
+                                        <div className="flex-1 w-full">
+                                            <div className="flex justify-between items-start">
+                                                <div>
+                                                    <h3 className="font-bold text-gray-800 text-lg group-hover:text-indigo-600 transition-colors">{job.jobTitle}</h3>
+                                                    <p className="text-gray-500 font-medium flex items-center gap-1">
+                                                        {job.companyName}
+                                                        {isVerified && <i className="bi bi-patch-check-fill text-indigo-600" title="Verified Company"></i>}
+                                                        <span className="mx-1">•</span> {job.city}
+                                                    </p>
+                                                </div>
+                                                <div className="flex items-center gap-1 bg-green-50 text-green-700 px-3 py-1 rounded-full text-sm font-bold border border-green-100">
+                                                    <i className="bi bi-stars"></i> {job.matchScore}% Match
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-4 mt-3 text-sm text-gray-500">
+                                                <span className="bg-gray-100 px-2 py-1 rounded text-gray-600">{job.employmentType}</span>
+                                                <span><i className="bi bi-cash me-1"></i>{job.salary}</span>
+                                            </div>
+                                        </div>
+                                        <button onClick={() => setCurrentMenu('jobSearch')} className="bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white px-4 py-2 rounded-lg font-medium transition-all w-full sm:w-auto">View</button>
+                                    </GlassCard>
+                                );
+                            }) : (
+                                <div className="text-center p-8 bg-gray-50 rounded-xl border border-dashed border-gray-300 text-gray-500">
+                                    No recommendations yet. Update your profile skills!
+                                </div>
+                            )}
+                        </div>
+                    </section>
+
+                    {/* Recent Activity */}
+                    <section>
+                         <SectionHeader title="Recent Activity" />
+                         <GlassCard className="overflow-hidden">
+                            <div className="divide-y divide-gray-100">
+                                {recentApps.length === 0 ? <div className="p-4 text-center text-muted">No recent activity.</div> : recentApps.map((app) => {
+                                    const isVerified = companiesMap[app.companyName] || companiesMap[app.companyId];
+                                    return (
+                                        <div key={app.id} className="p-4 flex items-center gap-4 hover:bg-gray-50 transition-colors">
+                                            <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 font-bold">{app.companyName?.charAt(0)}</div>
+                                            <div className="flex-1">
+                                                <h4 className="font-semibold text-gray-800">{app.jobTitle}</h4>
+                                                <p className="text-sm text-gray-500 flex items-center gap-1">
+                                                    {app.companyName}
+                                                    {isVerified && <i className="bi bi-patch-check-fill text-indigo-600" title="Verified Company"></i>}
+                                                </p>
+                                            </div>
+                                            <div className="text-right">
+                                                <span className="inline-block px-3 py-1 rounded-full text-xs font-medium mb-1 bg-blue-50 text-blue-700">{app.status}</span>
+                                                <p className="text-xs text-gray-400">{app.appliedAt?.toDate().toLocaleDateString()}</p>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                         </GlassCard>
+                    </section>
+                </div>
+
+                {/* Right Column */}
+                <div className="space-y-8">
+                    {/* Profile Strength */}
+                    <GlassCard className="p-6 bg-indigo-50 border border-indigo-100">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="font-bold text-gray-800">Profile Strength</h3>
+                            <span className="text-indigo-600 font-bold">85%</span>
+                        </div>
+                        <div className="w-full bg-white rounded-full h-2.5 mb-4">
+                            <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: '85%' }}></div>
+                        </div>
+                        <button onClick={() => setCurrentMenu('profile')} className="w-full py-2 bg-white text-indigo-600 border border-indigo-200 rounded-lg text-sm font-semibold hover:bg-indigo-50">Complete Profile</button>
+                    </GlassCard>
+                    
+                    {/* Active Hackathons */}
+                    <GlassCard className="p-6 border border-amber-100 bg-amber-50/30">
+                        <div className="flex items-center gap-3 mb-4">
+                            <div className="bg-amber-100 p-2 rounded-lg text-amber-600"><i className="bi bi-trophy-fill"></i></div>
+                            <h3 className="font-bold text-gray-800">Active Hackathons</h3>
+                        </div>
+                        <p className="text-sm text-gray-600 mb-4">Join coding challenges to win prizes and get noticed.</p>
+                        <button onClick={() => setCurrentMenu('hackathons')} className="w-full py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold hover:bg-amber-600 shadow-sm">
+                            Browse Hackathons
+                        </button>
+                    </GlassCard>
+
+                    {/* Quick Hackathons */}
+                    <div>
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-gray-800">Featured Hackathons</h3>
+                            <button 
+                                onClick={() => setCurrentMenu('hackathons')}
+                                className="text-indigo-600 hover:text-indigo-700 font-medium text-sm"
+                            >
+                                View All
+                            </button>
+                        </div>
+                        <div className="space-y-4">
+                            {hackathons.map((hackathon) => (
+                                <div key={hackathon.id} className="bg-white rounded-2xl p-4 border border-gray-200 hover:border-indigo-300 cursor-pointer">
+                                    <div className="flex items-start gap-3">
+                                        <div className="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
+                                            {hackathon.companyName.substring(0, 2)}
+                                        </div>
+                                        <div className="flex-1">
+                                            <h4 className="font-semibold text-gray-800 mb-1">{hackathon.title}</h4>
+                                            <p className="text-gray-600 text-sm mb-2">{hackathon.companyName}</p>
+                                            <div className="flex items-center gap-4 text-xs text-gray-500">
+                                                <span className="flex items-center gap-1">
+                                                    <i className="bi bi-trophy-fill text-amber-500"></i>
+                                                    {hackathon.prizePool}
+                                                </span>
+                                                <span className="flex items-center gap-1">
+                                                    <i className="bi bi-geo-alt-fill text-blue-500"></i>
+                                                    {hackathon.isVirtual ? 'Virtual' : hackathon.location}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ===============================================
+// 7. AUTH & ONBOARDING CARDS
 // ===============================================
 
 const AuthCardWrapper: FC<{ title: string; subtitle: string; children: ReactNode }> = ({ title, subtitle, children }) => (
@@ -413,297 +1136,7 @@ export const RegisterCard: FC<{ switchToLogin: () => void }> = ({ switchToLogin 
 };
 
 // ===============================================
-// 5. DASHBOARD & FEATURES
-// ===============================================
-
-// Mock Data Interfaces
-interface DashboardJobData { 
-    jobsApplied: number; 
-    savedJobs: number; 
-    interviews: number; 
-    newMatches: number; 
-    displayName: string; 
-    email: string;
-    userId: string;
-}
-
-interface Hackathon { 
-    id: string; 
-    title: string; 
-    description: string; 
-    companyName: string; 
-    prizePool: string; 
-    isVirtual: boolean; 
-    skills: string[]; 
-    startDate: string;
-    endDate: string;
-    location: string;
-}
-
-// Stat Card Component
-const StatCard: FC<{ title: string; value: number; icon: string; color: string; subtitle: string }> = ({ title, value, icon, color, subtitle }) => (
-    <GlassCard className="p-6 h-full">
-        <div className="flex justify-between items-start">
-            <div>
-                <p className="text-gray-500 text-sm font-medium mb-1">{title}</p>
-                <h3 className="text-3xl font-bold text-gray-800 mb-2">{value}</h3>
-                <p className="text-gray-400 text-sm">{subtitle}</p>
-            </div>
-            <div className={`p-3 rounded-2xl bg-${color}-100 text-${color}-600`}>
-                <i className={`bi ${icon} text-xl`}></i>
-            </div>
-        </div>
-    </GlassCard>
-);
-
-// Hackathon Card Component
-const HackathonCard: FC<{ hackathon: Hackathon }> = ({ hackathon }) => (
-    <GlassCard className="h-full flex flex-col">
-        <div className="p-6 flex-grow">
-            <div className="flex justify-between items-start mb-4">
-                <span className={`px-3 py-1 rounded-full text-xs font-medium ${hackathon.isVirtual ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-                    {hackathon.isVirtual ? '🌐 Virtual' : '🏢 On-Site'}
-                </span>
-                <span className="text-amber-600 font-bold text-sm">
-                    <i className="bi bi-trophy-fill mr-1"></i> {hackathon.prizePool}
-                </span>
-            </div>
-            <h5 className="font-bold text-lg text-gray-800 mb-2">{hackathon.title}</h5>
-            <p className="text-indigo-600 text-sm font-medium mb-3">{hackathon.companyName}</p>
-            <p className="text-gray-600 text-sm mb-4 line-clamp-2">{hackathon.description}</p>
-            <div className="flex gap-2 flex-wrap">
-                {hackathon.skills.slice(0, 3).map((skill, index) => (
-                    <span key={index} className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
-                        {skill}
-                    </span>
-                ))}
-                {hackathon.skills.length > 3 && (
-                    <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
-                        +{hackathon.skills.length - 3} more
-                    </span>
-                )}
-            </div>
-        </div>
-        <div className="p-4 border-t border-gray-100">
-            <button className="w-full bg-gray-50 hover:bg-gray-100 text-gray-700 font-medium py-2 px-4 rounded-xl">
-                View Details
-            </button>
-        </div>
-    </GlassCard>
-);
-
-// Dashboard Content Component
-const JobSeekerDashboardContent: FC<{ setCurrentMenu: (m: string) => void }> = ({ setCurrentMenu }) => {
-    const { user } = useAuth();
-    const [geminiPrompt, setGeminiPrompt] = useState('');
-    const [geminiLoading, setGeminiLoading] = useState(false);
-    
-    // Mock data
-    const jobData: DashboardJobData = {
-        jobsApplied: 14, 
-        savedJobs: 8, 
-        interviews: 3, 
-        newMatches: 12,
-        displayName: user?.displayName || 'Job Seeker',
-        email: user?.email || '',
-        userId: user?.uid || ''
-    };
-    
-    const hackathons: Hackathon[] = [
-        { 
-            id: '1', 
-            title: 'Global AI Challenge', 
-            description: 'Build innovative AI solutions for real-world problems. Open to all skill levels.', 
-            companyName: 'Google AI', 
-            prizePool: '$50,000', 
-            isVirtual: true, 
-            skills: ['Python', 'TensorFlow', 'Machine Learning'],
-            startDate: '2024-03-15',
-            endDate: '2024-03-17',
-            location: 'Virtual'
-        },
-        { 
-            id: '2', 
-            title: 'FinTech Innovation Hackathon', 
-            description: 'Create the next generation of financial technology solutions.', 
-            companyName: 'Stripe', 
-            prizePool: '$25,000', 
-            isVirtual: false, 
-            skills: ['React', 'Node.js', 'Blockchain'],
-            startDate: '2024-04-10',
-            endDate: '2024-04-12',
-            location: 'San Francisco, CA'
-        },
-    ];
-
-    const handleGeminiQuery = async () => {
-        if (!geminiPrompt.trim()) return;
-        
-        setGeminiLoading(true);
-        // Simulate API call
-        setTimeout(() => {
-            setGeminiLoading(false);
-            setGeminiPrompt('');
-        }, 2000);
-    };
-
-    return (
-        <div className="space-y-8">
-            {/* Welcome Header */}
-            <div className="bg-gradient-to-r from-indigo-500 to-purple-600 rounded-3xl p-8 text-white relative overflow-hidden">
-                <div className="relative z-10">
-                    <h1 className="text-3xl font-bold mb-2">Welcome back, {jobData.displayName}! 👋</h1>
-                    <p className="text-indigo-100 text-lg max-w-2xl">
-                        You have <span className="font-semibold text-amber-300">{jobData.interviews} interviews</span> coming up this week. 
-                        Ready to ace them?
-                    </p>
-                    <div className="flex gap-4 mt-6">
-                        <button 
-                            onClick={() => setCurrentMenu('jobSearch')} 
-                            className="bg-white text-indigo-600 px-6 py-3 rounded-xl font-semibold shadow-lg"
-                        >
-                            <i className="bi bi-search me-2"></i>Find Jobs
-                        </button>
-                        <button 
-                            onClick={() => setCurrentMenu('resume')} 
-                            className="bg-indigo-400 text-white border border-indigo-300 px-6 py-3 rounded-xl font-semibold hover:bg-indigo-300"
-                        >
-                            <i className="bi bi-file-earmark-person me-2"></i>Edit Resume
-                        </button>
-                    </div>
-                </div>
-            </div>
-
-            {/* Stats Grid */}
-            <div>
-                <SectionHeader title="Your Job Search at a Glance" />
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <StatCard 
-                        title="Jobs Applied" 
-                        value={jobData.jobsApplied} 
-                        icon="bi-send-check-fill" 
-                        color="blue"
-                        subtitle="This month"
-                    />
-                    <StatCard 
-                        title="Saved Jobs" 
-                        value={jobData.savedJobs} 
-                        icon="bi-bookmark-heart-fill" 
-                        color="rose"
-                        subtitle="Ready to apply"
-                    />
-                    <StatCard 
-                        title="Interviews" 
-                        value={jobData.interviews} 
-                        icon="bi-calendar-check-fill" 
-                        color="green"
-                        subtitle="Scheduled"
-                    />
-                    <StatCard 
-                        title="New Matches" 
-                        value={jobData.newMatches} 
-                        icon="bi-lightning-fill" 
-                        color="amber"
-                        subtitle="This week"
-                    />
-                </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                {/* AI Assistant - Left Column */}
-                <div className="lg:col-span-2">
-                    <GlassCard>
-                        <div className="p-6 border-b border-gray-100">
-                            <div className="flex items-center gap-4">
-                                <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center text-white text-xl shadow-lg">
-                                    <i className="bi bi-robot"></i>
-                                </div>
-                                <div>
-                                    <h3 className="text-xl font-bold text-gray-800">AI Career Assistant</h3>
-                                    <p className="text-gray-600">Get personalized advice for your job search</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div className="p-6">
-                            <div className="space-y-4 mb-6">
-                                <div className="flex justify-start">
-                                    <div className="bg-gray-100 rounded-2xl rounded-tl-none px-4 py-3 max-w-[80%]">
-                                        <p className="text-gray-700">
-                                            Hello! Based on your activity, I recommend focusing on technical interview preparation. 
-                                            Would you like me to generate some practice questions?
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-                            <div className="flex gap-3">
-                                <input
-                                    type="text"
-                                    className="flex-1 border border-gray-200 rounded-xl px-4 py-3 focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50"
-                                    placeholder="Ask me anything about your job search..."
-                                    value={geminiPrompt}
-                                    onChange={(e) => setGeminiPrompt(e.target.value)}
-                                    onKeyDown={(e) => e.key === 'Enter' && handleGeminiQuery()}
-                                />
-                                <button 
-                                    onClick={handleGeminiQuery}
-                                    disabled={geminiLoading}
-                                    className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-50"
-                                >
-                                    {geminiLoading ? (
-                                        <i className="bi bi-arrow-clockwise animate-spin"></i>
-                                    ) : (
-                                        <i className="bi bi-send-fill"></i>
-                                    )}
-                                </button>
-                            </div>
-                        </div>
-                    </GlassCard>
-                </div>
-
-                {/* Hackathons - Right Column */}
-                <div>
-                    <div className="flex justify-between items-center mb-6">
-                        <h3 className="text-xl font-bold text-gray-800">Featured Hackathons</h3>
-                        <button 
-                            onClick={() => setCurrentMenu('hackathons')}
-                            className="text-indigo-600 hover:text-indigo-700 font-medium text-sm"
-                        >
-                            View All
-                        </button>
-                    </div>
-                    <div className="space-y-4">
-                        {hackathons.map((hackathon) => (
-                            <div key={hackathon.id} className="bg-white rounded-2xl p-4 border border-gray-200 hover:border-indigo-300 cursor-pointer">
-                                <div className="flex items-start gap-3">
-                                    <div className="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-500 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
-                                        {hackathon.companyName.substring(0, 2)}
-                                    </div>
-                                    <div className="flex-1">
-                                        <h4 className="font-semibold text-gray-800 mb-1">{hackathon.title}</h4>
-                                        <p className="text-gray-600 text-sm mb-2">{hackathon.companyName}</p>
-                                        <div className="flex items-center gap-4 text-xs text-gray-500">
-                                            <span className="flex items-center gap-1">
-                                                <i className="bi bi-trophy-fill text-amber-500"></i>
-                                                {hackathon.prizePool}
-                                            </span>
-                                            <span className="flex items-center gap-1">
-                                                <i className="bi bi-geo-alt-fill text-blue-500"></i>
-                                                {hackathon.isVirtual ? 'Virtual' : hackathon.location}
-                                            </span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// ===============================================
-// 6. FLOATING SIDEBAR & LAYOUT
+// 8. FLOATING SIDEBAR & LAYOUT
 // ===============================================
 
 const Sidebar: FC<{ 
@@ -722,6 +1155,7 @@ const Sidebar: FC<{
         { key: 'savedJobs', label: 'Saved Jobs', icon: 'bi-bookmark-fill' },
         { key: 'applications', label: 'Applications', icon: 'bi-file-earmark-text-fill' },
         { key: 'hackathons', label: 'Hackathons', icon: 'bi-trophy-fill' },
+        { key: 'aptitude', label: 'Skill Test', icon: 'bi-lightning-charge-fill' },
         { key: 'resume', label: 'Resume Builder', icon: 'bi-file-earmark-person-fill' },
         { key: 'profile', label: 'Profile', icon: 'bi-person-circle' },
     ];
@@ -752,7 +1186,7 @@ const Sidebar: FC<{
                             setCurrentMenu(item.key);
                             setMobileOpen(false);
                         }}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left ${
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-colors ${
                             currentMenu === item.key
                                 ? 'bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg'
                                 : 'text-gray-600 hover:bg-gray-100 hover:text-gray-800'
@@ -781,7 +1215,7 @@ const Sidebar: FC<{
                 </div>
                 <button
                     onClick={handleLogout}
-                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-red-50 hover:text-red-600"
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-gray-600 hover:bg-red-50 hover:text-red-600 transition-colors"
                 >
                     <i className="bi bi-box-arrow-right text-lg"></i>
                     <span className="font-medium">Sign Out</span>
@@ -814,9 +1248,19 @@ const Sidebar: FC<{
 
 // Dashboard Shell Component
 const DashboardShell: FC = () => {
-    const { auth, setError, clearError } = useAuth();
+    const { auth, user, setError } = useAuth();
     const [currentMenu, setCurrentMenu] = useState('dashboard');
+    const [userData, setUserData] = useState<any>(null);
     const [mobileOpen, setMobileOpen] = useState(false);
+
+    const loadUserData = useCallback(async () => {
+        if (user) {
+            const data = await getUserData(user.uid);
+            setUserData(data);
+        }
+    }, [user]);
+
+    useEffect(() => { loadUserData(); }, [loadUserData]);
 
     const handleLogout = async () => {
         try {
@@ -831,7 +1275,7 @@ const DashboardShell: FC = () => {
     const renderContent = () => {
         switch(currentMenu) {
             case 'dashboard': 
-                return <JobSeekerDashboardContent setCurrentMenu={setCurrentMenu} />;
+                return <JobSeekerDashboardContent setCurrentMenu={setCurrentMenu} userData={userData} />;
             case 'profile': 
                 return <Profile />;
             case 'jobSearch': 
@@ -842,14 +1286,10 @@ const DashboardShell: FC = () => {
                 return <SavedJobs />;
             case 'applications': 
                 return <Applications />;
+            case 'aptitude': 
+                return <AptitudeTest />;
             case 'hackathons': 
-                return (
-                    <div className="text-center py-12">
-                        <i className="bi bi-trophy text-4xl text-amber-500 mb-4"></i>
-                        <h2 className="text-2xl font-bold text-gray-800 mb-2">Hackathons</h2>
-                        <p className="text-gray-600">All hackathons will be displayed here.</p>
-                    </div>
-                );
+                return <HackathonList />;
             case 'resume': 
                 return <ResumeBuilder />;
             default:
@@ -905,7 +1345,7 @@ const DashboardShell: FC = () => {
 };
 
 // ===============================================
-// 7. LANDING PAGE (Updated with View More Button)
+// 9. LANDING PAGE (Updated with View More Button)
 // ===============================================
 
 const LandingPage: FC<{ setPortal: (portal: 'seeker' | 'company') => void }> = ({ setPortal }) => {
@@ -1210,7 +1650,7 @@ const LandingPage: FC<{ setPortal: (portal: 'seeker' | 'company') => void }> = (
 };
 
 // ===============================================
-// 8. ROOT APP WRAPPER
+// 10. ROOT APP WRAPPER
 // ===============================================
 
 const AuthFlowManager: FC = () => {
@@ -1305,6 +1745,10 @@ const FinalApp: FC = () => (
                 -webkit-box-orient: vertical;
                 overflow: hidden;
             }
+            .animate-fade-in-up { animation: fadeInUp 0.5s ease-out forwards; } 
+            @keyframes fadeInUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } } 
+            .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; } 
+            @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         `}</style>
 
         <AuthProvider>

@@ -37,12 +37,20 @@ if (typeof window !== "undefined") {
 }
 
 // ====================================================
-// 2. Job Data + Utility Functions
+// 2. Data Interfaces
 // ====================================================
+
+interface CompanyData {
+  id: string;
+  companyName: string;
+  isVerified: boolean;
+  logoUrl?: string; // Optional: if you have logos
+}
+
 interface JobPostWithCoords {
   id: string;
   jobTitle: string;
-  companyName: string;
+  companyName: string; // Fallback from job doc
   companyId: string;
   city: string;
   description: string;
@@ -50,6 +58,8 @@ interface JobPostWithCoords {
   requirements?: string[];
   salary?: string;
   jobType?: string;
+  // Merged fields
+  verified?: boolean;
 }
 
 const calculateDistance = (
@@ -116,18 +126,31 @@ const DynamicJobMap = dynamic(
           {jobs.map((job) => (
             <Marker key={job.id} position={job.coordinates}>
               <Popup>
-                <strong className="text-primary">{job.jobTitle}</strong>
-                <br />
-                {job.companyName} &middot; {job.city}
-                <br />
-                <small>{job.description.substring(0, 50)}...</small>
-                <br />
-                <button
-                  className="btn btn-sm btn-info mt-2"
-                  onClick={() => onViewDetails(job)}
-                >
-                  View Details
-                </button>
+                <div className="p-1">
+                  <strong className="text-primary d-block mb-1">{job.jobTitle}</strong>
+                  <div className="d-flex align-items-center mb-1">
+                    <span className="fw-bold me-1">{job.companyName}</span>
+                    {job.verified && (
+                      <i 
+                        className="bi bi-patch-check-fill text-primary" 
+                        title="Verified Company"
+                        style={{ fontSize: '0.9rem' }}
+                      ></i>
+                    )}
+                  </div>
+                  <small className="text-muted d-block mb-2">
+                    <i className="bi bi-geo-alt me-1"></i>{job.city}
+                  </small>
+                  <div className="text-truncate mb-2" style={{ maxWidth: "200px" }}>
+                    {job.description}
+                  </div>
+                  <button
+                    className="btn btn-sm btn-outline-primary w-100"
+                    onClick={() => onViewDetails(job)}
+                  >
+                    View Details
+                  </button>
+                </div>
               </Popup>
             </Marker>
           ))}
@@ -135,7 +158,7 @@ const DynamicJobMap = dynamic(
           {userLocation && (
             <Marker position={userLocation}>
               <Popup>
-                <strong>Your Location (Approximate)</strong>
+                <strong>Your Location</strong>
               </Popup>
             </Marker>
           )}
@@ -155,7 +178,14 @@ const DynamicJobMap = dynamic(
 // ====================================================
 export const MapView: FC = () => {
   const { user, setError, clearError } = useAuth();
+  
+  // State for raw data
+  const [rawJobs, setRawJobs] = useState<any[]>([]);
+  const [companies, setCompanies] = useState<Record<string, CompanyData>>({});
+  
+  // Derived state
   const [allJobs, setAllJobs] = useState<JobPostWithCoords[]>([]);
+  
   const [loading, setLoading] = useState(true);
   const [userLocation, setUserLocation] = useState<LatLngTuple | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
@@ -167,11 +197,47 @@ export const MapView: FC = () => {
 
   const NEARBY_RADIUS_KM = 50;
 
-  // Fetch job postings
-  const fetchJobs = useCallback(() => {
-    setLoading(true);
-    clearError();
+  // 1. Fetch Companies Real-time
+  useEffect(() => {
+    const q = query(collection(db, "companies"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const companyMap: Record<string, CompanyData> = {};
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        companyMap[doc.id] = {
+          id: doc.id,
+          companyName: data.companyName || "Unknown",
+          isVerified: data.isVerified || false,
+          logoUrl: data.logoUrl
+        };
+      });
+      setCompanies(companyMap);
+    }, (error) => {
+      console.error("Error fetching companies:", error);
+    });
+    return () => unsubscribe();
+  }, []);
 
+  // 2. Fetch Jobs Real-time
+  useEffect(() => {
+    setLoading(true);
+    const q = query(collection(db, "jobPostings"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const jobsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setRawJobs(jobsData);
+      setLoading(false);
+    }, (error) => {
+      setError("Failed to load jobs: " + error.message);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, [setError]);
+
+  // 3. Merge Data (Jobs + Companies)
+  useEffect(() => {
     const cityToCoords: { [key: string]: LatLngTuple } = {
       Mumbai: [19.076, 72.8777],
       Bangalore: [12.9716, 77.5946],
@@ -179,58 +245,46 @@ export const MapView: FC = () => {
       Remote: [40.7128, -74.006],
       Chennai: [13.0827, 80.2707],
       Kolkata: [22.5726, 88.3639],
+      Hyderabad: [17.3850, 78.4867],
+      Pune: [18.5204, 73.8567],
     };
 
-    try {
-      const q = query(collection(db, "jobPostings"), orderBy("createdAt", "desc"));
-      const unsubscribe = onSnapshot(
-        q,
-        (snapshot) => {
-          const fetchedJobs: JobPostWithCoords[] = snapshot.docs.map((d) => {
-            const data = d.data();
-            const city = data.city || "Remote";
-            const latitude = data.latitude as number;
-            const longitude = data.longitude as number;
-            const coordinates: LatLngTuple =
-              latitude && longitude
-                ? [latitude, longitude]
-                : cityToCoords[city] || cityToCoords["Remote"];
+    const mergedJobs: JobPostWithCoords[] = rawJobs.map((job) => {
+      const companyInfo = companies[job.companyId];
+      
+      // Use real-time company name if available, else fallback to job doc
+      const companyName = companyInfo ? companyInfo.companyName : (job.companyName || "Unknown Company");
+      const isVerified = companyInfo ? companyInfo.isVerified : false;
 
-            return {
-              id: d.id,
-              jobTitle: data.jobTitle || "Untitled Position",
-              companyName: data.companyName || "Unknown Company",
-              companyId: data.companyId || "",
-              city: city,
-              description: data.description || "No description available",
-              coordinates,
-              requirements: data.requirements || [],
-              salary: data.salary || "Not specified",
-              jobType: data.jobType || "Full-time",
-            } as JobPostWithCoords;
-          });
-          setAllJobs(fetchedJobs);
-          setLoading(false);
-        },
-        (error) => {
-          setError("Failed to load jobs for map: " + error.message);
-          setLoading(false);
-        }
-      );
+      const city = job.city || "Remote";
+      const latitude = job.latitude as number;
+      const longitude = job.longitude as number;
+      
+      // Coordinate logic
+      let coordinates: LatLngTuple;
+      if (latitude && longitude) {
+        coordinates = [latitude, longitude];
+      } else {
+        coordinates = cityToCoords[city] || cityToCoords["Remote"];
+      }
 
-      return unsubscribe;
-    } catch (e) {
-      setError("Error setting up job listener.");
-      setLoading(false);
-    }
-  }, [setError, clearError]);
+      return {
+        id: job.id,
+        jobTitle: job.jobTitle || "Untitled Position",
+        companyName: companyName,
+        companyId: job.companyId || "",
+        city: city,
+        description: job.description || "No description available",
+        coordinates: coordinates,
+        requirements: job.requirements || [],
+        salary: job.salary || "Not specified",
+        jobType: job.jobType || "Full-time",
+        verified: isVerified
+      };
+    });
 
-  useEffect(() => {
-    const unsubscribe = fetchJobs();
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
-  }, [fetchJobs]);
+    setAllJobs(mergedJobs);
+  }, [rawJobs, companies]);
 
   // Get user location
   useEffect(() => {
@@ -238,18 +292,14 @@ export const MapView: FC = () => {
       navigator.geolocation.getCurrentPosition(
         (position) => {
           setUserLocation([position.coords.latitude, position.coords.longitude]);
-          setError("User location detected for 'Nearby' search.", false);
         },
         (error) => {
-          console.warn("Geolocation failed:", error);
-          setError(
-            "Could not get your precise location. 'Nearby' search is disabled.",
-            true
-          );
+          console.warn("Geolocation warning:", error);
+          // Don't set error state here to avoid intrusive UI alerts for permission denial
         }
       );
     }
-  }, [setError]);
+  }, []);
 
   // Apply filters
   const filteredJobs = useMemo(() => {
@@ -276,13 +326,12 @@ export const MapView: FC = () => {
         const distance = calculateDistance(userLat, userLng, jobLat, jobLng);
         return distance <= NEARBY_RADIUS_KM;
       });
-      setError(`Showing jobs within ${NEARBY_RADIUS_KM}km of your location.`, false);
     }
 
     return result;
-  }, [allJobs, searchTerm, cityFilter, nearbyFilter, userLocation, setError]);
+  }, [allJobs, searchTerm, cityFilter, nearbyFilter, userLocation]);
 
-  // Apply for job - FIXED VERSION
+  // Apply for job
   const handleApply = async () => {
     if (!selectedJob || !user) {
       setError("Please log in to apply for jobs.");
@@ -293,7 +342,7 @@ export const MapView: FC = () => {
       setApplying(true);
       clearError();
 
-      // Get user data from artifacts or use basic info
+      // Get user profile data merged with auth data
       let userName = user.displayName || "Unknown User";
       let userEmail = user.email || "";
       let userSkills: string[] = [];
@@ -301,24 +350,23 @@ export const MapView: FC = () => {
       let userEducation = "Not specified";
       let userResumeUrl = "";
 
-      // Try to fetch user profile data from artifacts
+      // Try fetching extended profile
       try {
         const { getDoc, doc } = await import("firebase/firestore");
-        const userDoc = await getDoc(doc(db, "artifacts", user.uid));
+        // Checking 'users' collection first as that's likely where profiles are
+        const userDoc = await getDoc(doc(db, "users", user.uid)); 
+        
         if (userDoc.exists()) {
           const userData = userDoc.data();
-          userName = userData.displayName || userData.name || userName;
-          userEmail = userData.email || userEmail;
-          userSkills = userData.skills || userData.tags || [];
-          userExperience = userData.experience || userData.workExperience || userExperience;
-          userEducation = userData.education || userEducation;
-          userResumeUrl = userData.resumeUrl || userData.cvUrl || userResumeUrl;
+          userName = userData.displayName || userName;
+          userSkills = userData.skills || [];
+          userExperience = userData.experience || userExperience;
+          // Add other fields as per your schema
         }
-      } catch (profileError) {
-        console.log("Using basic user data for application");
+      } catch (e) {
+        console.log("Profile fetch skipped/failed, using auth defaults");
       }
 
-      // Create the job application with all required fields
       const applicationData = {
         jobId: selectedJob.id,
         jobTitle: selectedJob.jobTitle,
@@ -327,15 +375,11 @@ export const MapView: FC = () => {
         userId: user.uid,
         userName: userName,
         userEmail: userEmail,
-        userPhone: user.phoneNumber || "Not provided",
         userSkills: userSkills,
-        userExperience: userExperience,
-        userEducation: userEducation,
-        userResumeUrl: userResumeUrl,
         status: "Submitted",
         appliedAt: serverTimestamp(),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        // Add coordinates for analytics map if needed
+        jobLocation: selectedJob.coordinates 
       };
 
       await addDoc(collection(db, "jobApplications"), applicationData);
@@ -344,7 +388,6 @@ export const MapView: FC = () => {
       setApplying(false);
       setError("Application submitted successfully!", false);
       
-      // Auto-close modal after 2 seconds
       setTimeout(() => {
         setSelectedJob(null);
         setApplied(false);
@@ -352,107 +395,119 @@ export const MapView: FC = () => {
       
     } catch (error: any) {
       console.error("Application error:", error);
-      setError("Failed to submit job application: " + (error.message || "Unknown error"));
+      setError("Failed to submit: " + (error.message || "Unknown error"));
       setApplying(false);
     }
   };
 
-  if (loading)
+  if (loading && allJobs.length === 0)
     return (
       <div className="text-center py-5">
-        <i className="bi bi-arrow-clockwise me-2 animate-spin"></i> Loading map data...
+        <div className="spinner-border text-primary" role="status">
+          <span className="visually-hidden">Loading...</span>
+        </div>
+        <p className="mt-2 text-muted">Loading map data...</p>
       </div>
     );
 
-  const availableCities = [...new Set(allJobs.map((job) => job.city))].sort();
+  const availableCities = Array.from(new Set(allJobs.map((job) => job.city))).sort();
 
   return (
     <div className="row">
       <div className="col-lg-12">
-        <div className="card shadow-lg p-4 mb-4">
-          <h5 className="fw-bold mb-3">Filter Jobs on Map</h5>
-          <div className="row g-3 align-items-end">
-            {/* Search */}
-            <div className="col-md-5">
-              <label className="form-label small text-muted">
-                Search Title, Company, or Description
-              </label>
-              <input
-                type="text"
-                className="form-control"
-                placeholder="Search 'React Developer' in 'Mumbai'"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-            </div>
-            {/* City Filter */}
-            <div className="col-md-3">
-              <label className="form-label small text-muted">Filter by City</label>
-              <select
-                className="form-select"
-                value={cityFilter}
-                onChange={(e) => setCityFilter(e.target.value)}
-              >
-                <option value="All">All Locations</option>
-                {availableCities.map((city) => (
-                  <option key={city} value={city}>
-                    {city}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {/* Nearby Filter */}
-            <div className="col-md-4">
-              <div className="form-check form-switch d-flex align-items-center">
-                <input
-                  className="form-check-input me-2"
-                  type="checkbox"
-                  id="nearbySwitch"
-                  checked={nearbyFilter}
-                  onChange={(e) => setNearbyFilter(e.target.checked)}
-                  disabled={!userLocation}
-                />
-                <label className="form-check-label fw-bold" htmlFor="nearbySwitch">
-                  Jobs Near Me ({NEARBY_RADIUS_KM} km)
-                </label>
+        {/* Filters Card */}
+        <div className="card shadow-sm border-0 mb-4 bg-white rounded-3">
+          <div className="card-body p-4">
+            
+            <div className="row g-3 align-items-end">
+              <div className="col-md-5">
+                <label className="form-label small text-muted fw-bold">Search</label>
+                <div className="input-group">
+                  <span className="input-group-text bg-light border-end-0">
+                    <i className="bi bi-search"></i>
+                  </span>
+                  <input
+                    type="text"
+                    className="form-control bg-light border-start-0"
+                    placeholder="Title, Company, or Keywords"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                </div>
+              </div>
+              
+              <div className="col-md-3">
+                <label className="form-label small text-muted fw-bold">Location</label>
+                <select
+                  className="form-select bg-light"
+                  value={cityFilter}
+                  onChange={(e) => setCityFilter(e.target.value)}
+                >
+                  <option value="All">All Cities</option>
+                  {availableCities.map((city) => (
+                    <option key={city} value={city}>{city}</option>
+                  ))}
+                </select>
+              </div>
+              
+              <div className="col-md-4">
+                <div className="form-check form-switch p-2 bg-light rounded border d-flex align-items-center">
+                  <input
+                    className="form-check-input ms-0 me-2"
+                    type="checkbox"
+                    id="nearbySwitch"
+                    checked={nearbyFilter}
+                    onChange={(e) => setNearbyFilter(e.target.checked)}
+                    disabled={!userLocation}
+                    style={{ cursor: userLocation ? "pointer" : "not-allowed" }}
+                  />
+                  <label className="form-check-label small mb-0" htmlFor="nearbySwitch">
+                    Show only jobs near me ({NEARBY_RADIUS_KM}km)
+                    {!userLocation && <span className="d-block text-danger x-small">Location blocked</span>}
+                  </label>
+                </div>
               </div>
             </div>
+            
+            <div className="mt-3 d-flex align-items-center justify-content-between">
+              <p className="text-muted small mb-0">
+                Found <strong>{filteredJobs.length}</strong> jobs
+              </p>
+              {searchTerm || cityFilter !== "All" || nearbyFilter ? (
+                <button 
+                  className="btn btn-link btn-sm text-decoration-none p-0"
+                  onClick={() => {
+                    setSearchTerm("");
+                    setCityFilter("All");
+                    setNearbyFilter(false);
+                  }}
+                >
+                  Clear Filters
+                </button>
+              ) : null}
+            </div>
           </div>
-          <p className="text-muted small mt-3 mb-0">
-            Showing <strong>{filteredJobs.length}</strong> jobs matching criteria.
-          </p>
         </div>
 
-        {/* Map */}
-        <div className="card shadow-lg">
-          <div className="card-body p-0 rounded-3 overflow-hidden">
-            <DynamicJobMap
-              jobs={filteredJobs}
-              userLocation={userLocation}
-              onViewDetails={setSelectedJob}
-            />
-          </div>
+        {/* Map Container */}
+        <div className="card shadow-lg border-0 rounded-3 overflow-hidden" style={{ minHeight: "500px" }}>
+          <DynamicJobMap
+            jobs={filteredJobs}
+            userLocation={userLocation}
+            onViewDetails={setSelectedJob}
+          />
         </div>
 
-        {/* Job Details Modal - IMPROVED VERSION */}
+        {/* Job Details Modal */}
         {selectedJob && (
-          <div
-            className="modal fade show"
-            style={{
-              display: "block",
-              background: "rgba(0,0,0,0.5)",
-            }}
-            tabIndex={-1}
-          >
+          <div className="modal fade show d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)" }} tabIndex={-1}>
             <div className="modal-dialog modal-dialog-centered modal-lg">
-              <div className="modal-content">
-                <div className="modal-header bg-primary text-white">
-                  <h5 className="modal-title">
-                    <i className="bi bi-briefcase me-2"></i>
-                    {selectedJob.jobTitle}
-                  </h5>
+              <div className="modal-content border-0 shadow-lg overflow-hidden">
+                <div className="modal-header bg-white border-bottom-0 pb-0">
+                  <h5 className="modal-title fw-bold">Job Details</h5>
                   <button
-                    className="btn-close btn-close-white"
+                    type="button"
+                    className="btn-close"
                     onClick={() => {
                       setSelectedJob(null);
                       setApplied(false);
@@ -460,108 +515,101 @@ export const MapView: FC = () => {
                     disabled={applying}
                   ></button>
                 </div>
-                <div className="modal-body">
-                  <div className="row">
+                
+                <div className="modal-body p-4">
+                  <div className="row g-4">
+                    {/* Left Column: Job Info */}
                     <div className="col-md-8">
-                      <h6 className="text-primary">{selectedJob.companyName}</h6>
-                      <div className="mb-3">
-                        <span className="badge bg-secondary me-2">
-                          <i className="bi bi-geo-alt me-1"></i>
-                          {selectedJob.city}
-                        </span>
-                        <span className="badge bg-info me-2">
-                          <i className="bi bi-clock me-1"></i>
-                          {selectedJob.jobType}
-                        </span>
-                        {selectedJob.salary && (
-                          <span className="badge bg-success">
-                            <i className="bi bi-currency-dollar me-1"></i>
-                            {selectedJob.salary}
+                      <h2 className="h4 fw-bold text-dark mb-1">{selectedJob.jobTitle}</h2>
+                      
+                      <div className="d-flex align-items-center mb-3">
+                        <span className="fs-5 text-primary me-2 fw-medium">{selectedJob.companyName}</span>
+                        {selectedJob.verified && (
+                          <span className="badge bg-primary-subtle text-primary border border-primary-subtle rounded-pill d-flex align-items-center px-2 py-1">
+                            <i className="bi bi-patch-check-fill me-1"></i> Verified
                           </span>
                         )}
                       </div>
-                      
-                      <h6>Job Description:</h6>
-                      <p className="text-muted">{selectedJob.description}</p>
-                      
+
+                      <div className="d-flex flex-wrap gap-2 mb-4">
+                        <span className="badge bg-light text-dark border">
+                          <i className="bi bi-geo-alt me-1 text-muted"></i> {selectedJob.city}
+                        </span>
+                        <span className="badge bg-light text-dark border">
+                          <i className="bi bi-briefcase me-1 text-muted"></i> {selectedJob.jobType}
+                        </span>
+                        {selectedJob.salary && (
+                          <span className="badge bg-success-subtle text-success border border-success-subtle">
+                            <i className="bi bi-cash me-1"></i> {selectedJob.salary}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="mb-4">
+                        <h6 className="fw-bold text-uppercase text-muted small mb-2">Description</h6>
+                        <p className="text-secondary" style={{ whiteSpace: 'pre-wrap' }}>
+                          {selectedJob.description}
+                        </p>
+                      </div>
+
                       {selectedJob.requirements && selectedJob.requirements.length > 0 && (
-                        <>
-                          <h6>Requirements:</h6>
-                          <ul className="list-unstyled">
-                            {selectedJob.requirements.map((req, index) => (
-                              <li key={index} className="mb-1">
-                                <i className="bi bi-check-circle text-success me-2"></i>
-                                {req}
+                        <div>
+                          <h6 className="fw-bold text-uppercase text-muted small mb-2">Requirements</h6>
+                          <ul className="list-group list-group-flush border-start border-3 border-primary ps-2">
+                            {selectedJob.requirements.map((req, i) => (
+                              <li key={i} className="list-group-item bg-transparent px-0 py-1 border-0 d-flex">
+                                <i className="bi bi-dot text-primary fs-4 lh-1 me-1"></i>
+                                <span>{req}</span>
                               </li>
                             ))}
                           </ul>
-                        </>
+                        </div>
                       )}
                     </div>
-                    
-                    <div className="col-md-4 border-start">
-                      <div className="sticky-top" style={{ top: '20px' }}>
-                        <h6>Quick Apply</h6>
-                        <div className="alert alert-info small">
-                          <i className="bi bi-info-circle me-2"></i>
-                          Your profile information will be used for this application.
-                        </div>
-                        
-                        {!user ? (
-                          <div className="alert alert-warning">
-                            <i className="bi bi-exclamation-triangle me-2"></i>
-                            Please log in to apply for this position.
-                          </div>
-                        ) : !applied ? (
-                          <button
-                            className="btn btn-primary w-100 mb-2"
-                            onClick={handleApply}
-                            disabled={applying}
-                          >
-                            {applying ? (
-                              <>
-                                <i className="bi bi-arrow-clockwise animate-spin me-2"></i>
-                                Submitting...
-                              </>
-                            ) : (
-                              <>
-                                <i className="bi bi-send me-2"></i>
-                                Apply Now
-                              </>
-                            )}
-                          </button>
-                        ) : (
-                          <div className="alert alert-success">
-                            <i className="bi bi-check-circle me-2"></i>
-                            Application Submitted!
-                          </div>
-                        )}
-                        
-                        <div className="small text-muted mt-3">
-                          <p><strong>Application includes:</strong></p>
-                          <ul className="small">
-                            <li>Your profile information</li>
-                            <li>Skills and experience</li>
-                            <li>Education background</li>
-                            <li>Resume (if available)</li>
-                          </ul>
+
+                    {/* Right Column: Actions */}
+                    <div className="col-md-4">
+                      <div className="card bg-light border-0 h-100">
+                        <div className="card-body">
+                          <h6 className="fw-bold mb-3">Apply Now</h6>
+                          
+                          {!user ? (
+                            <div className="alert alert-warning small mb-0">
+                              <i className="bi bi-lock me-1"></i> Login required
+                            </div>
+                          ) : applied ? (
+                            <div className="text-center py-4">
+                              <div className="mb-2">
+                                <i className="bi bi-check-circle-fill text-success fs-1"></i>
+                              </div>
+                              <h6 className="fw-bold text-success">Applied!</h6>
+                              <p className="small text-muted mb-0">Good luck!</p>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="small text-muted mb-3">
+                                Your profile details will be shared with <strong>{selectedJob.companyName}</strong>.
+                              </p>
+                              <button
+                                className="btn btn-primary w-100 py-2 fw-medium"
+                                onClick={handleApply}
+                                disabled={applying}
+                              >
+                                {applying ? (
+                                  <>
+                                    <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                                    Sending...
+                                  </>
+                                ) : (
+                                  <>Easy Apply <i className="bi bi-arrow-right ms-1"></i></>
+                                )}
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>
                   </div>
-                </div>
-                <div className="modal-footer">
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={() => {
-                      setSelectedJob(null);
-                      setApplied(false);
-                    }}
-                    disabled={applying}
-                  >
-                    Close
-                  </button>
                 </div>
               </div>
             </div>

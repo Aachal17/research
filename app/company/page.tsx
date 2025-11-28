@@ -7,8 +7,10 @@ import {
     signInWithPopup,
     signOut,
     updateProfile,
+    deleteUser,
+    User,
 } from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore'; 
+import { doc, setDoc, getDoc, deleteDoc, updateDoc } from 'firebase/firestore'; 
 import React, { FC, useState, useEffect, useCallback, ReactNode } from 'react';
 
 // NOTE: These are your required imports from the root page and firebase utils
@@ -28,7 +30,7 @@ import { PostHackathon } from './PostHackathon';
 const GlassCard: FC<{ children: ReactNode; className?: string; onClick?: () => void }> = ({ children, className = "", onClick }) => (
     <div 
         onClick={onClick}
-        className={`bg-white rounded-2xl shadow-sm border border-gray-100 ${onClick ? 'cursor-pointer' : ''} ${className}`}
+        className={`bg-white rounded-2xl shadow-sm border border-gray-100 ${onClick ? 'cursor-pointer transition-all hover:shadow-md' : ''} ${className}`}
     >
         {children}
     </div>
@@ -43,25 +45,27 @@ const SectionHeader: FC<{ title: string; subtitle?: string }> = ({ title, subtit
 
 const PrimaryButton: FC<React.ButtonHTMLAttributes<HTMLButtonElement>> = ({ className, children, ...props }) => (
     <button 
-        className={`bg-gradient-to-r from-green-600 to-emerald-600 text-white px-6 py-3 rounded-xl font-semibold shadow-md border-0 ${className}`}
+        className={`bg-gradient-to-r from-green-600 to-emerald-600 text-white px-6 py-3 rounded-xl font-semibold shadow-md border-0 disabled:opacity-50 disabled:cursor-not-allowed ${className}`}
         {...props}
     >
         {children}
     </button>
 );
 
-// --- Utility Functions for Company Data ---
-/**
- * Creates initial company data in Firestore upon registration.
- */
+// --- Utility Functions ---
 const createInitialCompanyData = async (uid: string, companyName: string, email: string | null) => {
     const companyRef = doc(db, 'companies', uid);
     const defaultData = {
         companyName: companyName,
         email: email || 'N/A',
         uid: uid,
-        contactName: 'N/A',
-        website: 'N/A',
+        description: '',
+        website: '',
+        employeeCount: '1-10',
+        industry: '',
+        contactName: '',
+        isVerified: false, 
+        verificationStatus: 'unsubmitted',
         jobPostings: 0,
         applicationsReceived: 0,
         candidatesHired: 0,
@@ -72,7 +76,6 @@ const createInitialCompanyData = async (uid: string, companyName: string, email:
     await setDoc(companyRef, defaultData, { merge: true });
 };
 
-// Fetches real company data from Firestore 'companies' collection
 const getCompanyData = async (uid: string) => {
     const companyRef = doc(db, 'companies', uid);
     try {
@@ -80,26 +83,430 @@ const getCompanyData = async (uid: string) => {
         if (docSnap.exists()) { 
             return docSnap.data() as any; 
         }
-        // Fallback for new accounts
-        return { 
-            companyName: auth.currentUser?.displayName || 'Company', 
-            jobPostings: 0, 
-            applicationsReceived: 0, 
-            candidatesHired: 0, 
-            activeSprints: 0,
-            hackathonsPosted: 0,
-        };
+        return { companyName: auth.currentUser?.displayName || 'Company' };
     } catch(e) {
         console.error("Error fetching company data:", e);
-        return { 
-            companyName: 'Error Company', 
-            jobPostings: 0, 
-            applicationsReceived: 0, 
-            candidatesHired: 0, 
-            activeSprints: 0,
-            hackathonsPosted: 0,
-        };
+        return { companyName: 'Error Company' };
     }
+};
+
+// ===============================================
+// NEW: TABBED SETTINGS COMPONENT
+// ===============================================
+
+const CompanySettings: FC<{ companyData: any; refreshData: () => void }> = ({ companyData, refreshData }) => {
+    const { user, setError } = useAuth();
+    const [activeTab, setActiveTab] = useState<'profile' | 'verification' | 'security'>('profile');
+    
+    // -- State for Profile Edit --
+    const [formData, setFormData] = useState({
+        companyName: companyData?.companyName || '',
+        website: companyData?.website || '',
+        employeeCount: companyData?.employeeCount || '1-10',
+        industry: companyData?.industry || '',
+        description: companyData?.description || '',
+    });
+
+    // -- State for Verification --
+    const [authName, setAuthName] = useState(companyData?.contactName || '');
+    const [aadharNo, setAadharNo] = useState(companyData?.aadharNumber || '');
+    const [cin, setCin] = useState(companyData?.cinNumber || '');
+    const [scanStatus, setScanStatus] = useState<'idle' | 'scanning' | 'matched' | 'failed'>('idle');
+    const [uploadFile, setUploadFile] = useState<File | null>(null);
+
+    // -- State for Global Loading --
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [deleteInput, setDeleteInput] = useState('');
+
+    // --- 1. Update Profile Logic ---
+    const handleProfileUpdate = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setIsSubmitting(true);
+        try {
+            if (!user) return;
+            const companyRef = doc(db, 'companies', user.uid);
+            
+            await updateDoc(companyRef, {
+                companyName: formData.companyName,
+                website: formData.website,
+                employeeCount: formData.employeeCount,
+                industry: formData.industry,
+                description: formData.description
+            });
+
+            // Update Auth Display Name as well
+            if (user && formData.companyName !== user.displayName) {
+                await updateProfile(user, { displayName: formData.companyName });
+            }
+
+            refreshData();
+            setError('Profile updated successfully!', false);
+        } catch (err: any) {
+            setError(err.message, true);
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    // --- 2. Smart Verification Logic (Aadhar Scanning Simulation) ---
+    const handleAadharScan = () => {
+        if (!uploadFile || !authName || !aadharNo) {
+            setError('Please provide Name, Aadhar Number, and upload the card image.', true);
+            return;
+        }
+
+        setScanStatus('scanning');
+
+        // Simulate Optical Character Recognition (OCR) delay
+        setTimeout(async () => {
+            // MOCK LOGIC: In a real app, this would send the image to an AWS Textract/Google Vision API
+            // For demo: We assume verification passes if the file is present.
+            
+            // Randomly matching for demo feel (or logic based on input)
+            const isMatch = true; 
+
+            if (isMatch) {
+                setScanStatus('matched');
+                try {
+                    if (!user) return;
+                    const companyRef = doc(db, 'companies', user.uid);
+                    await updateDoc(companyRef, {
+                        isVerified: true,
+                        verificationStatus: 'verified',
+                        contactName: authName,
+                        aadharNumber: aadharNo,
+                        cinNumber: cin
+                    });
+                    refreshData();
+                    setError('Identity Verified! Matches registered records.', false);
+                } catch (e: any) {
+                    setError(e.message, true);
+                }
+            } else {
+                setScanStatus('failed');
+                setError('Name on card does not match the registered authorized person.', true);
+            }
+        }, 3000); // 3 second simulated scan
+    };
+
+    // --- 3. Delete Account Logic ---
+    const handleDeleteAccount = async () => {
+        if (deleteInput !== 'DELETE') return;
+        setIsSubmitting(true);
+        try {
+            if (user) {
+                await deleteDoc(doc(db, 'companies', user.uid));
+                await deleteUser(user);
+            }
+        } catch (err: any) {
+            if (err.code === 'auth/requires-recent-login') {
+                setError('Security Check: Please log out and log back in to delete details.');
+            } else {
+                setError(err.message, true);
+            }
+            setIsSubmitting(false);
+            setShowDeleteConfirm(false);
+        }
+    };
+
+    // --- RENDER HELPERS ---
+    const TabButton = ({ id, label, icon }: { id: string, label: string, icon: string }) => (
+        <button
+            onClick={() => setActiveTab(id as any)}
+            className={`flex items-center gap-2 px-6 py-4 font-medium transition-all border-b-2 ${
+                activeTab === id 
+                ? 'border-green-600 text-green-700 bg-green-50/50' 
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+            }`}
+        >
+            <i className={`bi ${icon} text-lg`}></i>
+            {label}
+        </button>
+    );
+
+    return (
+        <div className="animate-fade-in-up">
+            {/* Header Area */}
+            <div className="flex flex-col md:flex-row justify-between items-end mb-8">
+                <div>
+                    <h2 className="text-3xl font-bold text-gray-800">Settings & Profile</h2>
+                    <p className="text-gray-500 mt-1">Manage your company presence and account security.</p>
+                </div>
+                {companyData?.isVerified && (
+                    <div className="bg-gradient-to-r from-emerald-500 to-teal-500 text-white px-4 py-2 rounded-full flex items-center gap-2 shadow-lg shadow-emerald-200">
+                        <i className="bi bi-patch-check-fill text-lg"></i>
+                        <span className="font-semibold tracking-wide">Verified Entity</span>
+                    </div>
+                )}
+            </div>
+
+            <GlassCard className="overflow-hidden min-h-[600px]">
+                {/* Tabs Navigation */}
+                <div className="flex border-b border-gray-100 overflow-x-auto">
+                    <TabButton id="profile" label="General Profile" icon="bi-building" />
+                    <TabButton id="verification" label="Verification Center" icon="bi-shield-lock" />
+                    <TabButton id="security" label="Account Security" icon="bi-gear" />
+                </div>
+
+                <div className="p-8">
+                    {/* TAB 1: EDIT PROFILE */}
+                    {activeTab === 'profile' && (
+                        <form onSubmit={handleProfileUpdate} className="max-w-4xl mx-auto space-y-8 animate-fade-in">
+                            <div className="flex items-start gap-6">
+                                {/* Logo Avatar Placeholder */}
+                                <div className="group relative w-32 h-32 bg-gray-100 rounded-2xl flex items-center justify-center border-2 border-dashed border-gray-300 cursor-pointer hover:border-green-400 transition-colors">
+                                    <div className="text-center text-gray-400 group-hover:text-green-600">
+                                        <i className="bi bi-camera-fill text-3xl mb-1 block"></i>
+                                        <span className="text-xs font-medium">Upload Logo</span>
+                                    </div>
+                                    <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" accept="image/*" />
+                                </div>
+                                
+                                <div className="flex-1">
+                                    <h4 className="text-lg font-bold text-gray-800 mb-4">Company Details</h4>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div>
+                                            <label className="form-label text-gray-700 font-medium text-sm">Company Name</label>
+                                            <input 
+                                                type="text" 
+                                                className="form-control rounded-xl border-gray-200 py-3 mt-1 bg-gray-50 focus:bg-white transition-colors"
+                                                value={formData.companyName}
+                                                onChange={(e) => setFormData({...formData, companyName: e.target.value})}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="form-label text-gray-700 font-medium text-sm">Industry</label>
+                                            <select 
+                                                className="form-control rounded-xl border-gray-200 py-3 mt-1 bg-gray-50 focus:bg-white"
+                                                value={formData.industry}
+                                                onChange={(e) => setFormData({...formData, industry: e.target.value})}
+                                            >
+                                                <option value="">Select Industry</option>
+                                                <option value="Tech">Technology & SaaS</option>
+                                                <option value="Finance">Finance & Fintech</option>
+                                                <option value="Healthcare">Healthcare</option>
+                                                <option value="Education">Education</option>
+                                                <option value="Retail">Retail & E-commerce</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="form-label text-gray-700 font-medium text-sm">Website URL</label>
+                                            <input 
+                                                type="url" 
+                                                placeholder="https://"
+                                                className="form-control rounded-xl border-gray-200 py-3 mt-1 bg-gray-50 focus:bg-white"
+                                                value={formData.website}
+                                                onChange={(e) => setFormData({...formData, website: e.target.value})}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="form-label text-gray-700 font-medium text-sm">Employee Range</label>
+                                            <select 
+                                                className="form-control rounded-xl border-gray-200 py-3 mt-1 bg-gray-50 focus:bg-white"
+                                                value={formData.employeeCount}
+                                                onChange={(e) => setFormData({...formData, employeeCount: e.target.value})}
+                                            >
+                                                <option value="1-10">1-10 Employees</option>
+                                                <option value="11-50">11-50 Employees</option>
+                                                <option value="51-200">51-200 Employees</option>
+                                                <option value="201-500">201-500 Employees</option>
+                                                <option value="500+">500+ Employees</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="form-label text-gray-700 font-medium text-sm">About Company</label>
+                                <textarea 
+                                    rows={4}
+                                    className="form-control rounded-xl border-gray-200 py-3 mt-1 bg-gray-50 focus:bg-white w-full"
+                                    placeholder="Tell candidates about your mission, culture, and values..."
+                                    value={formData.description}
+                                    onChange={(e) => setFormData({...formData, description: e.target.value})}
+                                />
+                            </div>
+
+                            <div className="flex justify-end pt-4 border-t border-gray-100">
+                                <PrimaryButton type="submit" disabled={isSubmitting}>
+                                    {isSubmitting ? 'Saving Changes...' : 'Save Profile'}
+                                </PrimaryButton>
+                            </div>
+                        </form>
+                    )}
+
+                    {/* TAB 2: VERIFICATION CENTER */}
+                    {activeTab === 'verification' && (
+                        <div className="max-w-3xl mx-auto space-y-8 animate-fade-in">
+                            <div className="text-center mb-8">
+                                <h3 className="text-xl font-bold text-gray-800">Identity Verification</h3>
+                                <p className="text-gray-500">We use AI to match your documents with your registration details.</p>
+                            </div>
+
+                            {/* Verification Status Banner */}
+                            {companyData?.isVerified ? (
+                                <div className="bg-green-50 border border-green-200 rounded-2xl p-8 text-center">
+                                    <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center mx-auto mb-4 shadow-sm text-green-600 text-4xl">
+                                        <i className="bi bi-shield-check"></i>
+                                    </div>
+                                    <h4 className="text-2xl font-bold text-green-800 mb-2">Verification Complete</h4>
+                                    <p className="text-green-700 max-w-md mx-auto">
+                                        Your business identity has been verified via Aadhar and CIN matching. You have full access to hiring tools.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="space-y-6">
+                                    {/* Scan Animation Overlay */}
+                                    {scanStatus === 'scanning' && (
+                                        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
+                                            <div className="relative w-64 h-40 bg-gray-800 rounded-lg border-2 border-white/30 overflow-hidden mb-4 shadow-2xl">
+                                                <div className="absolute top-0 left-0 w-full h-1 bg-green-400 shadow-[0_0_15px_rgba(74,222,128,0.8)] animate-[scan_2s_infinite_linear]"></div>
+                                                <div className="absolute inset-0 flex items-center justify-center text-white/20 text-6xl">
+                                                    <i className="bi bi-person-badge"></i>
+                                                </div>
+                                            </div>
+                                            <p className="text-white font-mono text-lg tracking-widest animate-pulse">ANALYZING DOCUMENT...</p>
+                                            <style>{`
+                                                @keyframes scan {
+                                                    0% { top: 0; }
+                                                    100% { top: 100%; }
+                                                }
+                                            `}</style>
+                                        </div>
+                                    )}
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div>
+                                            <label className="block text-sm font-semibold text-gray-700 mb-2">Authorized Person Name</label>
+                                            <input 
+                                                type="text" 
+                                                className="w-full border border-gray-300 rounded-xl px-4 py-3 focus:ring-2 focus:ring-green-200 outline-none"
+                                                placeholder="Name as per Aadhar"
+                                                value={authName}
+                                                onChange={(e) => setAuthName(e.target.value)}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-semibold text-gray-700 mb-2">Aadhar Number</label>
+                                            <input 
+                                                type="text" 
+                                                className="w-full border border-gray-300 rounded-xl px-4 py-3 focus:ring-2 focus:ring-green-200 outline-none"
+                                                placeholder="XXXX XXXX XXXX"
+                                                value={aadharNo}
+                                                onChange={(e) => setAadharNo(e.target.value)}
+                                            />
+                                        </div>
+                                        <div className="md:col-span-2">
+                                            <label className="block text-sm font-semibold text-gray-700 mb-2">Company CIN (Corporate ID)</label>
+                                            <input 
+                                                type="text" 
+                                                className="w-full border border-gray-300 rounded-xl px-4 py-3 focus:ring-2 focus:ring-green-200 outline-none"
+                                                placeholder="L12345MH..."
+                                                value={cin}
+                                                onChange={(e) => setCin(e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="border-2 border-dashed border-gray-300 rounded-2xl p-8 text-center hover:border-green-400 transition-colors bg-gray-50">
+                                        <i className="bi bi-cloud-arrow-up text-4xl text-gray-400 mb-3 block"></i>
+                                        <h5 className="font-semibold text-gray-700 mb-1">Upload Aadhar Card (Front & Back)</h5>
+                                        <p className="text-sm text-gray-500 mb-4">Supported formats: JPG, PNG, PDF (Max 5MB)</p>
+                                        <input 
+                                            type="file" 
+                                            className="hidden" 
+                                            id="aadhar-upload" 
+                                            onChange={(e) => setUploadFile(e.target.files ? e.target.files[0] : null)}
+                                        />
+                                        <label 
+                                            htmlFor="aadhar-upload"
+                                            className="inline-block bg-white border border-gray-300 text-gray-700 px-6 py-2 rounded-lg font-medium cursor-pointer hover:bg-gray-50"
+                                        >
+                                            {uploadFile ? uploadFile.name : 'Select File'}
+                                        </label>
+                                    </div>
+
+                                    <div className="flex justify-end pt-4">
+                                        <PrimaryButton onClick={handleAadharScan} className="w-full md:w-auto">
+                                            <i className="bi bi-qr-code-scan me-2"></i>
+                                            Scan & Verify
+                                        </PrimaryButton>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* TAB 3: DANGER ZONE */}
+                    {activeTab === 'security' && (
+                        <div className="max-w-3xl mx-auto space-y-8 animate-fade-in">
+                            <div className="border border-red-200 rounded-2xl bg-red-50 p-8">
+                                <div className="flex items-start gap-4">
+                                    <div className="bg-red-100 p-3 rounded-xl text-red-600">
+                                        <i className="bi bi-exclamation-triangle-fill text-2xl"></i>
+                                    </div>
+                                    <div>
+                                        <h3 className="text-xl font-bold text-red-800 mb-2">Delete Company Account</h3>
+                                        <p className="text-red-600 mb-6 max-w-xl">
+                                            Deleting your account is permanent. All your job postings (active and closed), 
+                                            candidate data, and company profile information will be wiped immediately.
+                                        </p>
+                                        <button 
+                                            onClick={() => setShowDeleteConfirm(true)}
+                                            className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-xl font-semibold shadow-sm transition-colors"
+                                        >
+                                            Delete Account
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </GlassCard>
+
+            {/* Delete Modal */}
+            {showDeleteConfirm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl animate-fade-in-up">
+                        <div className="text-center mb-6">
+                            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">
+                                <i className="bi bi-trash-fill"></i>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-900 mb-2">Final Confirmation</h3>
+                            <p className="text-gray-600 text-sm">
+                                This action is irreversible. Type <span className="font-mono font-bold text-red-600">DELETE</span> to confirm account removal.
+                            </p>
+                        </div>
+                        <input 
+                            type="text" 
+                            className="w-full border border-gray-300 rounded-xl px-4 py-3 mb-6 focus:ring-2 focus:ring-red-200 outline-none text-center font-bold tracking-widest"
+                            value={deleteInput}
+                            onChange={(e) => setDeleteInput(e.target.value)}
+                            placeholder="DELETE"
+                        />
+                        <div className="flex gap-3">
+                            <button 
+                                onClick={() => { setShowDeleteConfirm(false); setDeleteInput(''); }}
+                                className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-3 rounded-xl transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button 
+                                onClick={handleDeleteAccount}
+                                disabled={deleteInput !== 'DELETE' || isSubmitting}
+                                className="flex-1 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-semibold py-3 rounded-xl transition-colors"
+                            >
+                                {isSubmitting ? 'Deleting...' : 'Confirm'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
 };
 
 // ===============================================
@@ -608,11 +1015,10 @@ export const CompanyDashboard: FC = () => {
 
             case 'settings':
                 return (
-                    <div className="text-center py-12">
-                        <i className="bi bi-gear text-4xl text-gray-400 mb-4"></i>
-                        <h2 className="text-2xl font-bold text-gray-800 mb-2">Company Settings</h2>
-                        <p className="text-gray-600">Update company profile, branding, and billing details.</p>
-                    </div>
+                    <CompanySettings 
+                        companyData={companyData} 
+                        refreshData={loadCompanyData} 
+                    />
                 );
             default: // 'dashboard'
                 if (loading) {
@@ -627,13 +1033,22 @@ export const CompanyDashboard: FC = () => {
                 }
                 
                 return (
-                    <div className="space-y-8">
+                    <div className="space-y-8 animate-fade-in">
                         {/* Welcome Header */}
-                        <div className="bg-gradient-to-r from-green-500 to-emerald-600 rounded-3xl p-8 text-white">
-                            <h1 className="text-3xl font-bold mb-2">Welcome back, {companyData?.companyName}! 👋</h1>
-                            <p className="text-green-100 text-lg">
-                                Manage your job postings, track candidates, and grow your team with JobMap.
-                            </p>
+                        <div className="bg-gradient-to-r from-green-500 to-emerald-600 rounded-3xl p-8 text-white relative overflow-hidden">
+                            <div className="relative z-10">
+                                <h1 className="text-3xl font-bold mb-2">
+                                    Welcome back, {companyData?.companyName}! 👋
+                                    {companyData?.isVerified && (
+                                        <i className="bi bi-patch-check-fill ms-2 text-white/90" title="Verified Company"></i>
+                                    )}
+                                </h1>
+                                <p className="text-green-100 text-lg">
+                                    Manage your job postings, track candidates, and grow your team with JobMap.
+                                </p>
+                            </div>
+                            {/* Decorative element */}
+                            <div className="absolute right-0 top-0 h-full w-1/3 bg-white/10 transform skew-x-12"></div>
                         </div>
 
                         {/* Stats Grid */}

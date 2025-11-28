@@ -20,6 +20,25 @@ export const Applications: FC = () => {
     const [applications, setApplications] = useState<ApplicationData[]>([]);
     const [loading, setLoading] = useState(true);
     const [selectedApp, setSelectedApp] = useState<ApplicationData | null>(null);
+    
+    // Store verified status mapping: CompanyName -> isVerified
+    const [verifiedCompanies, setVerifiedCompanies] = useState<Record<string, boolean>>({});
+
+    // 1. Fetch Verified Companies Real-time
+    useEffect(() => {
+        const q = query(collection(db, 'companies'));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const verifiedMap: Record<string, boolean> = {};
+            snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data.companyName) {
+                    verifiedMap[data.companyName] = data.isVerified || false;
+                }
+            });
+            setVerifiedCompanies(verifiedMap);
+        });
+        return () => unsubscribe();
+    }, []);
 
     const getStatusClass = (status: string) => {
         if (status.includes('Interview')) return 'bg-warning text-dark';
@@ -153,7 +172,12 @@ export const Applications: FC = () => {
                                                 <div className="rounded-circle bg-light border d-flex align-items-center justify-content-center fw-bold text-secondary" style={{width: '32px', height: '32px', fontSize: '0.8rem'}}>
                                                     {app.companyName.charAt(0)}
                                                 </div>
-                                                <span className="text-secondary">{app.companyName}</span>
+                                                <div className="d-flex align-items-center">
+                                                    <span className="text-secondary">{app.companyName}</span>
+                                                    {verifiedCompanies[app.companyName] && (
+                                                        <i className="bi bi-patch-check-fill text-primary ms-1" title="Verified Company"></i>
+                                                    )}
+                                                </div>
                                             </div>
                                         </td>
                                         <td className="text-muted small">{formatDate(app.appliedAt)}</td>
@@ -194,7 +218,12 @@ export const Applications: FC = () => {
                                     </div>
                                     <div>
                                         <h5 className="fw-bold text-dark mb-0">{selectedApp.jobTitle}</h5>
-                                        <p className="text-muted mb-0">{selectedApp.companyName}</p>
+                                        <p className="text-muted mb-0 d-flex align-items-center">
+                                            {selectedApp.companyName}
+                                            {verifiedCompanies[selectedApp.companyName] && (
+                                                <i className="bi bi-patch-check-fill text-primary ms-1" title="Verified Company"></i>
+                                            )}
+                                        </p>
                                     </div>
                                 </div>
                                 
